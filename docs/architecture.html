@@ -43,6 +43,9 @@
   .node.watched{stroke-dasharray:5 4}
   .pill{fill:var(--panel);stroke:var(--line);stroke-width:1.5}
   .edge{fill:none;stroke:var(--wire);stroke-width:1.5}
+  /* a data-flow (dashed), as opposed to a call (solid): readings move from
+     yeetd into cognee's memory, polled on a timer by the hub. */
+  .flow{fill:none;stroke:var(--wire);stroke-width:1.3;stroke-dasharray:4 3}
 
   .t-hub{fill:var(--ink);font-family:var(--sans);font-size:17px;font-weight:600;text-anchor:middle}
   .t-hub-sub{fill:var(--muted);font-family:var(--sans);font-size:11px;text-anchor:middle}
@@ -74,6 +77,8 @@
 
       <!-- edges first; arrowheads sit in the gap between line and node -->
       <g>
+        <!-- data flow: yeetd readings polled over the top into cognee's memory -->
+        <path class="flow" d="M135,120 C135,74 625,74 625,120" marker-end="url(#arw)"/>
         <path class="edge" d="M380,72 V294" marker-end="url(#arw)"/>                                <!-- you -> agent -->
         <path class="edge" d="M327,296 L181,186" marker-start="url(#arw)" marker-end="url(#arw)"/>  <!-- agent <-> yeetd -->
         <path class="edge" d="M433,296 L579,186" marker-start="url(#arw)" marker-end="url(#arw)"/>  <!-- agent <-> cognee -->
@@ -114,6 +119,9 @@
 
       <!-- edge verbs (on top, with halos). two-way edges carry both directions. -->
       <g>
+        <rect class="halo" x="306" y="77" width="148" height="16"/>
+        <text class="t-verb" x="380" y="89">polled → remembered</text>
+
         <rect class="halo" x="356" y="172" width="48" height="16"/>
         <text class="t-verb" x="380" y="184">asks</text>
 
@@ -142,9 +150,11 @@
   </div>
 
   <p class="foot">
-    With <code>yeetd</code> and <code>cognee</code> the exchange runs both ways — the agent
-    sets what to watch and reads back observations; it writes memories and queries past
-    behaviour. It calls <code>ollama</code> to reason. The coding agent is only ever seen
-    through <code>yeetd</code> — never contacted directly.
+    The dashed path is the data flow: the hub polls <code>yeetd</code> on a timer and
+    writes each reading into <code>cognee</code>'s memory. The solid edges are calls — with
+    <code>yeetd</code> and <code>cognee</code> the exchange runs both ways (set what to
+    watch, read observations; write memories, query past behaviour), and it calls
+    <code>ollama</code> to reason. The coding agent is only ever seen through
+    <code>yeetd</code> — never contacted directly.
   </p>
 </div>
