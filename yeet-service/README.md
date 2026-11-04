@@ -53,7 +53,7 @@ yeet service apply -f service.toml
 # confirm it's up
 yeet service tree | grep -A4 sentinel-sysgraph
 
-# smoke-test
+# verify it's working
 curl -s http://127.0.0.1:9490/ | python3 -m json.tool | head -40
 ```
 

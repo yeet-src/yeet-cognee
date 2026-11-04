@@ -26,7 +26,7 @@ git clone https://github.com/yeet-src/yeet-cognee && cd yeet-cognee
 # 1. yeet side — the reading service
 cd yeet-service
 yeet service apply -f service.toml                    # start it
-curl -s http://127.0.0.1:9490/ | head                # smoke-test a reading
+curl -s http://127.0.0.1:9490/ | head                # verify it's working
 
 # 2. cognee side
 cd ../memory
