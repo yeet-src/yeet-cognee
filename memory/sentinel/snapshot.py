@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import socket
 from dataclasses import dataclass, field
 
 from .yeetq import Yeet
@@ -158,7 +159,9 @@ def take(
         top_other=top_n_other,
     )
     return Snapshot(
-        hostname=hostname or payload.get("hostname") or "unknown-host",
+        # Prefer an explicit name, then the one the service stamped, else this
+        # machine's own name -- so a single-box demo needs no host config at all.
+        hostname=hostname or payload.get("hostname") or socket.gethostname(),
         taken_at=_parse_ts(payload.get("taken_at")),
         run_label=run_label,
         system=payload.get("system") or {},

@@ -15,9 +15,9 @@ pip install -r requirements.txt   # just cognee; everything else is stdlib
 cp .env.example .env              # point cognee at your LLM + embeddings
 ```
 
-Make sure the yeet reader is running (see `../yeet-service/README.md`) and
-that `SENTINEL_READING_URL` in `.env` points at it (default
-`http://127.0.0.1:9490/reading`).
+Make sure the yeet reader is running (see `../yeet-service/README.md`). On the
+same machine the default (`http://127.0.0.1:9490/reading`) just works; point
+`SENTINEL_READING_URL` elsewhere only if the reader is on another host or port.
 
 ## The loop
 

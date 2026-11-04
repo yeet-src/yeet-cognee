@@ -25,7 +25,6 @@ git clone https://github.com/yeet-src/yeet-cognee && cd yeet-cognee
 
 # 1. yeet side — the reading service
 cd yeet-service
-sed -i 's/CHANGE-ME/'"$(hostname)"'/' service.toml   # name this box
 yeet service apply -f service.toml                    # start it
 curl -s http://127.0.0.1:9490/ | head                # smoke-test a reading
 
@@ -34,7 +33,6 @@ cd ../memory
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                                  # point cognee at your LLM
-export SENTINEL_READING_URL=http://127.0.0.1:9490/reading
 
 python -m sentinel.seed --reset                       # load policy + runbook
 bash scenario/run_scenario.sh baseline benign-001     # record normal behaviour

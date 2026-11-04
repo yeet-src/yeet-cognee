@@ -47,10 +47,6 @@ its detail query is tolerated (a path error), not a failure.
 Requires a Linux host with yeet installed and `yeetd` running.
 
 ```bash
-# name this box in the manifest so every reading is stamped with it
-#   (cognee links observations of the same host by name)
-sed -i 's/CHANGE-ME/'"$(hostname)"'/' service.toml
-
 # apply it (creates or updates the service, rolls out the change)
 yeet service apply -f service.toml
 
@@ -60,6 +56,11 @@ yeet service tree | grep -A4 sentinel-sysgraph
 # smoke-test
 curl -s http://127.0.0.1:9490/ | python3 -m json.tool | head -40
 ```
+
+By default each reading is stamped with the machine's own name (the cognee side
+fills it in), which is all a single-box demo needs. To stamp a specific name —
+e.g. when the cognee side runs on another host, so readings link to the right
+box — set it in `service.toml`: `args = ["--hostname", "my-box"]`.
 
 To focus on a workload, launch something and watch it:
 

@@ -4,11 +4,12 @@ enabled = true
 working-directory = "."
 
 # The reader: owns the `http` portal, assembles a host reading per request
-# from the system graph. Set --hostname to this box's own name so every
-# reading is stamped with it (cognee links observations of a host by name).
+# from the system graph. By default each reading is stamped with the machine's
+# own name (the cognee side fills it in), which is all a single-box demo needs.
+# To stamp a specific name instead -- e.g. when the cognee side runs elsewhere,
+# so readings link to the right host -- add: args = ["--hostname", "my-box"]
 [units.serve]
 isolate = "./reading.js"
-args = ["--hostname", "CHANGE-ME"]
 
 # Bound to localhost: the reader exposes host internals, and in this demo the
 # cognee side runs on the same box. If the memory side runs elsewhere, change
