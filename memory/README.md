@@ -21,61 +21,50 @@ same machine the default (`http://127.0.0.1:9490/reading`) just works; point
 
 ## The loop
 
+The **memory service owns cognee**: it seeds the brain, records on a timer, and
+answers questions — all from one cognee instance. (cognee's embedded store is
+single-writer, so a long-running recorder and a separate `ask` in two processes
+would contend for one lock. One owner is the fix, and it mirrors the yeet side:
+reader is a service, memory is a service too.)
+
 ```bash
-# 1. teach it the company brain — the sandbox policy + ops runbook
-python -m sentinel.seed --reset
+# 1. start the memory service — seeds policy + runbook, then loops + serves.
+#    Leave it running (its own shell; a systemd unit for real use).
+python -m sentinel.serve --seed --reset --watch coder_agent.py --every 5m
 
-# 2. grow memory: record how the workload normally behaves
-#    (the collector polls the reader and remembers one prose run report)
-bash scenario/run_scenario.sh baseline benign-001
-bash scenario/run_scenario.sh baseline benign-002
+# 2. in another shell (activate the venv again): a workload starts poking around.
+#    Keep it running -- ask judges the LIVE state; memory is only reference.
+. .venv/bin/activate
+python scenario/coder_agent.py --mode unusual --hold 300 \
+  --touch /etc/passwd --touch /proc/1/status &
+curl -s localhost:9495/remember -d '{"watch":["coder_agent.py"],"label":"rogue-001"}'; echo
 
-# 3. record a run that pokes around the host
-bash scenario/run_scenario.sh unusual rogue-001 /etc/passwd /proc/1/status
-
-# 4. ask
+# 3. ask while it's live — a thin client to the service (~1s, no cognee cold start)
 python -m sentinel.ask --watch coder_agent.py \
-  "Does it look like this agent is trying to escape its sandbox?"
+  "Does it look like this agent is trying to escape its sandbox?"     # -> YES
 python -m sentinel.ask \
   "Is this box overloaded, or is this normal right now?"
 ```
 
-Each `run_scenario.sh` records **one** short run. `--reset` on seed wipes
-memory, so run it once, not before every scenario.
+`ask` judges the **live** reading (what the workload is doing *now*); the
+recorded history and policy are reference for "is this normal / has this happened
+before". So ask while the workload is running. To build normal history for
+comparison, record benign runs the same way, or use
+`bash scenario/run_scenario.sh baseline benign-001` (which records through the
+service when it's up, then waits for its fixture to finish).
 
-## The memory service (sentinel.serve) — the always-on path
+The service's routes:
 
-The scenarios above are one-shot, and `ask` above opens cognee itself. That's
-fine when nothing else is using the store — but cognee's embedded databases are
-**single-writer**, so you can't run a long-running recorder in one process and
-`ask` in another: they'd contend for one lock.
-
-The fix is to let **one process own cognee**. `sentinel.serve` does that: it
-runs the collector loop internally (polls the reader, remembers on a timer) and
-answers questions over HTTP, all from a single cognee instance.
-
-```bash
-# seed the brain, then loop + serve (Ctrl-C to stop)
-python -m sentinel.serve --seed --reset --watch coder_agent.py --every 5m
-
-# background, surviving logout (use a systemd unit for real deployments):
-nohup python -m sentinel.serve --watch coder_agent.py --every 5m \
-  > serve.log 2>&1 &
-```
-
-- `GET /healthz` — liveness. `POST /ask {"question": "...", "watch": [...]}` → `{"verdict": "..."}`.
-- Bind with `--host`/`--port` (default `127.0.0.1:9495`); `--no-loop` serves without recording.
-
-With the service running, **`ask` is a thin client** — it posts the question and
-gets a verdict in about a second, no cognee cold start:
-
-```bash
-python -m sentinel.ask --watch coder_agent.py "is this agent escaping its sandbox?"
-```
+- `GET /healthz` — liveness.
+- `POST /ask {"question": "...", "watch": [...]}` → `{"verdict": "..."}`.
+- `POST /remember {"watch": [...], "label": "..."}` → record one run now (what `run_scenario.sh` calls).
+- `--host`/`--port` to bind (default `127.0.0.1:9495`); `--no-loop` serves without the timer; `--seed`/`--reset` seed on start.
 
 `ask` talks to the service by default (`$SENTINEL_SERVE_URL` or
-`http://127.0.0.1:9495`); if none is running it falls back to opening cognee
-directly, or pass `--standalone` to force that.
+`http://127.0.0.1:9495`). **Without the service running**, everything still
+works standalone: `run_scenario.sh` records with a one-shot collector and `ask`
+opens cognee directly (or pass `--standalone`). Seed separately in that case
+with `python -m sentinel.seed --reset`.
 
 ## What each module does
 

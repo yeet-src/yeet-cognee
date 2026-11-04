@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Run one coder-agent fixture and observe it with the sentinel collector.
+# Run one coder-agent fixture and record it into the sentinel's memory.
 #
-# Launches the fixture (which holds itself open for a while), waits a moment
-# for it to settle, then runs the collector to take several readings of it
-# and fold them into one run report in cognee.
+# Launches the fixture (which holds itself open for a while), waits a moment for
+# it to settle, then records several readings of it as one run report. If the
+# memory service (sentinel.serve) is running, it records THROUGH the service so
+# there is only ever one cognee client; otherwise it records standalone.
 #
 # Usage:
 #   run_scenario.sh baseline benign-001
@@ -23,6 +24,7 @@ PY=.venv/bin/python
 HOLD=70
 SAMPLES=4
 INTERVAL=8
+SERVE_URL="${SENTINEL_SERVE_URL:-http://127.0.0.1:9495}"
 
 TOUCH_ARGS=()
 for p in "$@"; do
@@ -37,12 +39,19 @@ echo ">> fixture running as pid $FIXTURE_PID, log /tmp/coder-agent-$LABEL.log"
 
 sleep 4   # let it open its files and socket before we start reading
 
-echo ">> collecting $SAMPLES readings with the sentinel"
-$PY -m sentinel.collector \
-  --watch coder_agent.py \
-  --label "$LABEL" \
-  --samples "$SAMPLES" \
-  --interval "$INTERVAL"
+if curl -sf "$SERVE_URL/healthz" >/dev/null 2>&1; then
+  echo ">> recording via the memory service at $SERVE_URL"
+  curl -s "$SERVE_URL/remember" -H 'Content-Type: application/json' \
+    -d "{\"watch\":[\"coder_agent.py\"],\"label\":\"$LABEL\",\"samples\":$SAMPLES,\"interval\":$INTERVAL}"
+  echo
+else
+  echo ">> no memory service running; recording standalone"
+  $PY -m sentinel.collector \
+    --watch coder_agent.py \
+    --label "$LABEL" \
+    --samples "$SAMPLES" \
+    --interval "$INTERVAL"
+fi
 
 echo ">> waiting for fixture to exit"
 wait "$FIXTURE_PID" 2>/dev/null || true

@@ -7,7 +7,9 @@ fix is to let ONE process own cognee. This service does that -- it:
 
   1. runs the collector loop internally: polls the yeet reader on a timer and
      remembers a fresh run report, so memory grows on its own;
-  2. answers questions over HTTP (`POST /ask`), reasoning from that same cognee.
+  2. records on demand (`POST /remember`), so a scenario can populate memory
+     without opening a second cognee client;
+  3. answers questions over HTTP (`POST /ask`), reasoning from that same cognee.
 
 So it mirrors the yeet side: the reader is a service with routes, and memory is
 a service too. `sentinel.ask` becomes a thin client that posts the question
@@ -109,23 +111,44 @@ def make_handler(cog: Cognee, args: argparse.Namespace):
                 return self._send(200, {"ok": True})
             self._send(404, {"error": f"no such route: {self.path}"})
 
+        def _body(self) -> dict:
+            length = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+
         def do_POST(self):
-            if self.path.rstrip("/") != "/ask":
-                return self._send(404, {"error": f"no such route: {self.path}"})
+            route = self.path.rstrip("/")
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
-                question = (body.get("question") or "").strip()
-                if not question:
-                    return self._send(400, {"error": "missing 'question'"})
-                watch = body.get("watch") or []
-                # live reading + verdict are stateless (HTTP to reader / ollama);
-                # only the recall touches cognee, through the single owner.
-                live = askmod.gather_live(Yeet(url=args.url), watch)
-                memory = cog.recall(args.dataset)
-                self._send(200, {"verdict": askmod.verdict(question, live, memory)})
+                if route == "/ask":
+                    return self._ask(self._body())
+                if route == "/remember":
+                    return self._remember(self._body())
+                self._send(404, {"error": f"no such route: {self.path}"})
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
+
+        def _ask(self, body: dict):
+            question = (body.get("question") or "").strip()
+            if not question:
+                return self._send(400, {"error": "missing 'question'"})
+            watch = body.get("watch") or []
+            # live reading + verdict are stateless (HTTP to reader / ollama);
+            # only the recall touches cognee, through the single owner.
+            live = askmod.gather_live(Yeet(url=args.url), watch)
+            memory = cog.recall(args.dataset)
+            self._send(200, {"verdict": askmod.verdict(question, live, memory)})
+
+        def _remember(self, body: dict):
+            # Record one run now, through the owned cognee -- so a scenario can
+            # populate memory without opening a second cognee client.
+            watch = body.get("watch") or args.watch
+            samples = int(body.get("samples") or args.samples)
+            interval = float(body.get("interval") or args.interval)
+            label = f"{body.get('label') or args.label}-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}"
+            snaps = collect(Yeet(url=args.url), watch, label, samples, interval, args.hostname)
+            if not snaps:
+                return self._send(200, {"remembered": None, "readings": 0})
+            cog.remember(render_run_report(snaps), args.dataset)
+            self._send(200, {"remembered": label, "readings": len(snaps)})
 
     return Handler
 
