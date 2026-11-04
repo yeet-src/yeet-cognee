@@ -45,4 +45,21 @@ python -m sentinel.ask \
   "Is this box overloaded, or is this normal right now?"
 ```
 
+## Keep memory growing
+
+The `run_scenario.sh` lines above each record **one** short run. For memory that
+builds on its own, run the collector in a loop as a background process — this is
+the long-running piece that keeps polling the reader and remembering:
+
+```bash
+nohup python -m sentinel.collector --watch coder_agent.py --loop --every 5m \
+  > collector.log 2>&1 &
+```
+
+Now every 5 minutes a fresh run report lands in cognee, and `ask` keeps getting
+richer history to judge against. (For a real deployment, run it as a systemd
+service instead of `nohup`.)
+
+---
+
 `yeet-service/` and `memory/` each have their own README with the details.

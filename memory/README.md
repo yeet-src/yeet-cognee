@@ -40,6 +40,29 @@ python -m sentinel.ask \
   "Is this box overloaded, or is this normal right now?"
 ```
 
+Each `run_scenario.sh` records **one** short run. `--reset` on seed wipes
+memory, so run it once, not before every scenario.
+
+## Keeping memory growing (the long-running collector)
+
+The scenarios above are one-shot. To make cognee's picture of the host build on
+its own, run the collector in **loop mode** as a background process — this is
+the only long-running piece on the cognee side:
+
+```bash
+# remember a fresh run report every 5 minutes, forever (Ctrl-C to stop)
+python -m sentinel.collector --watch coder_agent.py --loop --every 5m
+
+# in the background, surviving logout:
+nohup python -m sentinel.collector --watch coder_agent.py --loop --every 5m \
+  > collector.log 2>&1 &
+```
+
+Each cycle takes `--samples` readings, folds them into one prose run report
+labelled with a timestamp, and hands it to `cognee.remember()`. A cycle that
+can't reach the reader logs and retries rather than exiting. For a real
+deployment, wrap this in a systemd unit instead of `nohup`.
+
 ## What each module does
 
 | Module | Role |
