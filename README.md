@@ -45,20 +45,24 @@ python -m sentinel.ask \
   "Is this box overloaded, or is this normal right now?"
 ```
 
-## Keep memory growing
+## Keep memory growing — the memory service
 
-The `run_scenario.sh` lines above each record **one** short run. For memory that
-builds on its own, run the collector in a loop as a background process — this is
-the long-running piece that keeps polling the reader and remembering:
+The `run_scenario.sh` lines above each record **one** run (and `ask` above
+opens cognee directly, which is fine when nothing else is). For memory that
+builds on its own — and fast questions — run the **memory service**. One process
+owns cognee: it polls the reader on a timer and remembers, *and* it answers
+questions over HTTP. cognee's embedded store is single-writer, so one owner is
+the right design — and it mirrors the yeet side, where the reader is a service
+too.
 
 ```bash
-nohup python -m sentinel.collector --watch coder_agent.py --loop --every 5m \
-  > collector.log 2>&1 &
+# loop + serve (seed the brain on first start)
+python -m sentinel.serve --seed --reset --watch coder_agent.py --every 5m
 ```
 
-Now every 5 minutes a fresh run report lands in cognee, and `ask` keeps getting
-richer history to judge against. (For a real deployment, run it as a systemd
-service instead of `nohup`.)
+With it running, `python -m sentinel.ask …` becomes a thin client: it posts the
+question to the service and gets a verdict in about a second, with no cognee
+cold start. For a real deployment, run the service under systemd.
 
 ---
 

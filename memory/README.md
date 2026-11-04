@@ -43,25 +43,39 @@ python -m sentinel.ask \
 Each `run_scenario.sh` records **one** short run. `--reset` on seed wipes
 memory, so run it once, not before every scenario.
 
-## Keeping memory growing (the long-running collector)
+## The memory service (sentinel.serve) — the always-on path
 
-The scenarios above are one-shot. To make cognee's picture of the host build on
-its own, run the collector in **loop mode** as a background process — this is
-the only long-running piece on the cognee side:
+The scenarios above are one-shot, and `ask` above opens cognee itself. That's
+fine when nothing else is using the store — but cognee's embedded databases are
+**single-writer**, so you can't run a long-running recorder in one process and
+`ask` in another: they'd contend for one lock.
+
+The fix is to let **one process own cognee**. `sentinel.serve` does that: it
+runs the collector loop internally (polls the reader, remembers on a timer) and
+answers questions over HTTP, all from a single cognee instance.
 
 ```bash
-# remember a fresh run report every 5 minutes, forever (Ctrl-C to stop)
-python -m sentinel.collector --watch coder_agent.py --loop --every 5m
+# seed the brain, then loop + serve (Ctrl-C to stop)
+python -m sentinel.serve --seed --reset --watch coder_agent.py --every 5m
 
-# in the background, surviving logout:
-nohup python -m sentinel.collector --watch coder_agent.py --loop --every 5m \
-  > collector.log 2>&1 &
+# background, surviving logout (use a systemd unit for real deployments):
+nohup python -m sentinel.serve --watch coder_agent.py --every 5m \
+  > serve.log 2>&1 &
 ```
 
-Each cycle takes `--samples` readings, folds them into one prose run report
-labelled with a timestamp, and hands it to `cognee.remember()`. A cycle that
-can't reach the reader logs and retries rather than exiting. For a real
-deployment, wrap this in a systemd unit instead of `nohup`.
+- `GET /healthz` — liveness. `POST /ask {"question": "...", "watch": [...]}` → `{"verdict": "..."}`.
+- Bind with `--host`/`--port` (default `127.0.0.1:9495`); `--no-loop` serves without recording.
+
+With the service running, **`ask` is a thin client** — it posts the question and
+gets a verdict in about a second, no cognee cold start:
+
+```bash
+python -m sentinel.ask --watch coder_agent.py "is this agent escaping its sandbox?"
+```
+
+`ask` talks to the service by default (`$SENTINEL_SERVE_URL` or
+`http://127.0.0.1:9495`); if none is running it falls back to opening cognee
+directly, or pass `--standalone` to force that.
 
 ## What each module does
 
@@ -70,14 +84,15 @@ deployment, wrap this in a systemd unit instead of `nohup`.
 | `sentinel/yeetq.py` | HTTP client for the reading service |
 | `sentinel/snapshot.py` | one reading → **prose** (stable entity names cognee can link) |
 | `sentinel/report.py` | a run's readings → one prose run report |
-| `sentinel/collector.py` | poll the reader on a timer → `cognee.remember()` |
+| `sentinel/collector.py` | record **one** run → `cognee.remember()` (scenarios, seeding history) |
+| `sentinel/serve.py` | **the memory service**: owns cognee, loops + answers `/ask` |
 | `sentinel/seed.py` | ingest `context/*.md` (the company brain) |
-| `sentinel/ask.py` | live reading + `cognee.recall()` → LLM verdict |
+| `sentinel/ask.py` | thin client to the service (or standalone: reading + recall → verdict) |
 | `sentinel/llm.py` | a direct, controlled call to the local LLM for the verdict |
 
-`collector.py` is the write path — "event happened, remember it." `ask.py` is
-the read path — retrieve, then reason. They are deliberately separate: see the
-three-role table in the top-level README.
+The write path (remember) and the read path (retrieve, then reason) are
+deliberately separate roles — but one process owns the store. See the three-role
+table in the top-level README.
 
 ## Useful flags
 
@@ -86,12 +101,16 @@ three-role table in the top-level README.
 python -m sentinel.collector --watch coder_agent.py --label x --samples 6 --interval 5
 python -m sentinel.collector --watch coder_agent.py --label x --dry-run
 
-# point at a reader on another host/port
-python -m sentinel.ask --url http://other-host:9490/reading --watch coder_agent.py "..."
+# ask a service on another host/port
+python -m sentinel.ask --server http://other-host:9495 --watch coder_agent.py "..."
 
-# see exactly what the model was given
-python -m sentinel.ask --watch coder_agent.py "..." --verbose
+# standalone ask against a reader on another host/port, printing the full prompt
+python -m sentinel.ask --standalone --url http://other-host:9490/reading \
+  --watch coder_agent.py "..." --verbose
 ```
+
+(`--url`, `--verbose` and `--dataset` apply to the standalone path; when asking
+the service, it uses the reader and dataset it was started with.)
 
 ## The company brain
 

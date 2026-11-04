@@ -1,17 +1,12 @@
-"""Collector: read yeet on a timer, render prose, hand it to cognee.
+"""Collector: read yeet a few times, render prose, hand it to cognee.
 
-This is the glue, and nothing more. It owns no truth of its own -- yeet
-produces, the collector transports, cognee remembers. It is also the thing that
-makes the memory a memory: run it with --loop and it keeps polling the reader
-and remembering, so cognee's picture of the host grows on its own.
+This records ONE run and exits -- several readings folded into one prose run
+report, remembered by cognee. It is the right tool for scenarios and for seeding
+history. For an always-on feed that keeps memory growing while questions are
+being asked, use `sentinel.serve`, which owns cognee and runs this same loop
+internally (so there is never a second cognee client).
 
-    # record one run and exit (good for scenarios / seeding history)
     python -m sentinel.collector --watch coder_agent.py --label benign-001
-
-    # run forever: remember a fresh run report every few minutes
-    python -m sentinel.collector --watch coder_agent.py --loop --every 5m
-
-    # print the prose without ingesting
     python -m sentinel.collector --watch coder_agent.py --label x --dry-run
 """
 
@@ -19,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import datetime as dt
 import pathlib
 import sys
 import time
@@ -112,14 +106,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--watch", action="append", default=[],
                     help="substring matched against a process's exe and cmdline; repeatable")
-    ap.add_argument("--label", default="run",
-                    help="run label, e.g. benign-001 (in --loop mode, a timestamp is appended)")
+    ap.add_argument("--label", default="run", help="run label, e.g. benign-001")
     ap.add_argument("--samples", type=int, default=4, help="readings per run (default 4)")
     ap.add_argument("--interval", type=float, default=8.0, help="seconds between readings")
-    ap.add_argument("--loop", action="store_true",
-                    help="keep running: record a fresh run report every --every, forever")
-    ap.add_argument("--every", default="5m",
-                    help="in --loop mode, time between runs: 30s, 5m, 1h, or seconds (default 5m)")
     ap.add_argument("--dataset", default="sysgraph", help="cognee dataset name")
     ap.add_argument("--url", default=None,
                     help="sysgraph service URL (default $SENTINEL_READING_URL or http://127.0.0.1:9490/reading)")
@@ -130,25 +119,7 @@ def main() -> int:
     args = ap.parse_args()
 
     yeet = Yeet(url=args.url)
-
-    if not args.loop:
-        return 0 if record_once(yeet, args, args.label) else 1
-
-    every = parse_duration(args.every)
-    print(f"Looping: a run of {args.samples} readings every {args.every}, until Ctrl-C.\n")
-    cycle = 0
-    try:
-        while True:
-            cycle += 1
-            label = f"{args.label}-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}"
-            print(f"===== cycle {cycle} =====")
-            if not record_once(yeet, args, label):
-                print("  (no readings this cycle; will retry)", file=sys.stderr)
-            print(f"\nSleeping {args.every} until the next run...\n")
-            time.sleep(every)
-    except KeyboardInterrupt:
-        print(f"\nStopped after {cycle} cycle(s).")
-        return 0
+    return 0 if record_once(yeet, args, args.label) else 1
 
 
 if __name__ == "__main__":

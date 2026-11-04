@@ -25,12 +25,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import sys
+import urllib.error
+import urllib.request
 
 from .llm import generate
 from .report import render_run_report
 from .snapshot import take
 from .yeetq import Yeet, YeetError
+
+DEFAULT_SERVE_URL = "http://127.0.0.1:9495"
 
 SYSTEM_PROMPT = """You are a host-monitoring analyst. You judge ONE host \
 using two inputs:
@@ -110,7 +116,11 @@ async def retrieve_memory(dataset: str) -> str:
     return memory[:3500]
 
 
-def answer(question: str, live: str, memory: str, verbose: bool) -> None:
+def verdict(question: str, live: str, memory: str, verbose: bool = False) -> str:
+    """The reasoning step: live reading + retrieved memory -> a verdict string.
+
+    Shared by the standalone CLI path and the memory service, so the prompt and
+    the strict contract live in exactly one place."""
     prompt = (
         f"The question you must answer is:\n  >>> {question} <<<\n\n"
         f"===== LIVE READING (ground truth, from the kernel, right now) =====\n"
@@ -121,21 +131,53 @@ def answer(question: str, live: str, memory: str, verbose: bool) -> None:
         f"Answer this question now, in the required VERDICT shape:\n  >>> {question} <<<"
     )
     if verbose:
-        print("=" * 70)
-        print("PROMPT SENT TO THE MODEL:\n")
-        print(prompt)
-        print("=" * 70)
+        print("=" * 70, file=sys.stderr)
+        print("PROMPT SENT TO THE MODEL:\n", file=sys.stderr)
+        print(prompt, file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+    return generate(prompt, system=SYSTEM_PROMPT)
 
-    verdict = generate(prompt, system=SYSTEM_PROMPT)
+
+def print_verdict(text: str) -> None:
     print("\n" + "=" * 70)
     print("SENTINEL VERDICT")
     print("=" * 70 + "\n")
-    print(verdict)
+    print(text)
+
+
+def answer_standalone(question: str, watch: list[str], url: str | None,
+                      dataset: str, verbose: bool) -> str:
+    """Answer by opening cognee in this process. Only safe when the long-running
+    memory service (sentinel.serve) is NOT also running against the same store."""
+    yeet = Yeet(url=url)
+    print("Reading live state of the host via yeet...", file=sys.stderr)
+    live = gather_live(yeet, watch)
+    print("Retrieving policy, runbook and history from cognee...", file=sys.stderr)
+    memory = asyncio.run(retrieve_memory(dataset))
+    print("Reasoning over ground truth + memory with the local model...", file=sys.stderr)
+    return verdict(question, live, memory, verbose)
+
+
+def ask_server(server_url: str, question: str, watch: list[str]) -> str:
+    """Thin client: let the running memory service answer from its one cognee."""
+    payload = json.dumps({"question": question, "watch": watch}).encode("utf-8")
+    req = urllib.request.Request(
+        server_url.rstrip("/") + "/ask", data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        return json.loads(resp.read().decode("utf-8"))["verdict"]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("question")
+    ap.add_argument("--server", default=None,
+                    help=f"memory service URL (default $SENTINEL_SERVE_URL or {DEFAULT_SERVE_URL}); "
+                         "when it's running, questions are answered from the one cognee it owns")
+    ap.add_argument("--standalone", action="store_true",
+                    help="open cognee directly instead of asking the service "
+                         "(don't use this while sentinel.serve is running)")
     ap.add_argument("--url", default=None,
                     help="sysgraph service URL (default $SENTINEL_READING_URL or http://127.0.0.1:9490/reading)")
     ap.add_argument("--watch", action="append", default=[],
@@ -144,13 +186,17 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
-    yeet = Yeet(url=args.url)
-    print("Reading live state of the host via yeet...")
-    live = gather_live(yeet, args.watch)
-    print("Retrieving policy, runbook and history from cognee...")
-    memory = asyncio.run(retrieve_memory(args.dataset))
-    print("Reasoning over ground truth + memory with the local model...")
-    answer(args.question, live, memory, args.verbose)
+    server = args.server or os.environ.get("SENTINEL_SERVE_URL") or DEFAULT_SERVE_URL
+    if not args.standalone:
+        try:
+            print_verdict(ask_server(server, args.question, args.watch))
+            return 0
+        except urllib.error.URLError:
+            print(f"(no sentinel memory service at {server}; answering standalone)",
+                  file=sys.stderr)
+
+    print_verdict(answer_standalone(args.question, args.watch, args.url,
+                                    args.dataset, args.verbose))
     return 0
 
 
