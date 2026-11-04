@@ -1,0 +1,6 @@
+# The cognee side's only third-party dependency. Everything else the sentinel
+# uses is in the Python standard library (urllib, asyncio, json, dataclasses).
+#
+# cognee pulls in its own LLM/vector/graph stack. This demo was built and
+# tested against 1.6.6; newer releases should work but may move the API.
+cognee==1.6.6

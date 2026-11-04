@@ -1,0 +1,15 @@
+# secrets / local config
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# generated prose readings
+memory/snapshots/
+
+# os / logs
+.DS_Store
+*.log
