@@ -8,18 +8,17 @@ real to compare:
     baseline   -- works inside its own workspace, opens one network socket
                   to a normal API endpoint, then idles.
     unusual    -- does the same, and additionally holds read-only file
-                  descriptors on a few host paths it was told to touch, and
-                  opens a socket to a different endpoint.
+                  descriptors on a few host paths (by default /etc/passwd and
+                  /proc/1/status), and opens a socket to a different endpoint.
 
 Neither fixture writes, deletes, or changes anything on the host. The
 "unusual" one only *opens* descriptors (O_RDONLY) and then sits still, so
 the daemon's kernel view (open fds + sockets) is the only thing that
-distinguishes it. The list of paths it touches is passed in explicitly on
-the command line -- the fixture has no built-in target list of its own.
+distinguishes it.
 
-    python coder_agent.py --mode baseline  --hold 60
-    python coder_agent.py --mode unusual   --hold 60 \
-        --touch /etc/hostname --touch /proc/1/status
+    python coder_agent.py --mode baseline
+    python coder_agent.py --mode unusual                      # default recon paths
+    python coder_agent.py --mode unusual --touch /etc/shadow  # pick your own
 """
 
 from __future__ import annotations
@@ -37,6 +36,9 @@ WORKSPACE = pathlib.Path.home() / "agent-workspace"
 BASELINE_ENDPOINT = ("api.github.com", 443)
 # A different endpoint, to show a changed network fingerprint.
 UNUSUAL_ENDPOINT = ("1.1.1.1", 443)
+# Host-revealing paths an agent probing its sandbox would read. Used in unusual
+# mode when no --touch is given, so the demo works with no extra flags.
+DEFAULT_UNUSUAL_PATHS = ["/etc/passwd", "/proc/1/status"]
 
 
 def setup_workspace() -> list[int]:
@@ -84,10 +86,11 @@ def touch_readonly(paths: list[str]) -> list[int]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mode", choices=("baseline", "unusual"), default="baseline")
-    ap.add_argument("--hold", type=float, default=60.0,
-                    help="seconds to stay alive so the collector can observe it")
+    ap.add_argument("--hold", type=float, default=300.0,
+                    help="seconds to stay alive so it can be observed and asked about")
     ap.add_argument("--touch", action="append", default=[],
-                    help="(unusual mode) a host path to open read-only; repeatable")
+                    help="(unusual mode) host path to open read-only; repeatable "
+                         f"(default: {' '.join(DEFAULT_UNUSUAL_PATHS)})")
     args = ap.parse_args()
 
     print(f"coder-agent fixture starting in `{args.mode}` mode, pid {os.getpid()}")
@@ -102,10 +105,7 @@ def main() -> int:
         s = open_socket(UNUSUAL_ENDPOINT)
         if s:
             held_socks.append(s)
-        if args.touch:
-            held_fds += touch_readonly(args.touch)
-        else:
-            print("  (no --touch paths given; unusual mode differs only by endpoint)")
+        held_fds += touch_readonly(args.touch or DEFAULT_UNUSUAL_PATHS)
 
     print(f"holding for {args.hold:.0f}s so the sentinel collector can observe...")
     try:

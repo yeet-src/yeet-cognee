@@ -38,35 +38,27 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                                  # point cognee at your LLM
 
-# 3. memory service — owns cognee: seeds the policy + runbook, then records on a
-#    timer and answers questions. Leave this running (its own shell, or a
-#    systemd unit for real use).
-python -m sentinel.serve --seed --reset --watch coder_agent.py --every 5m
+# 3. memory service — owns cognee: seeds the policy + runbook, records what it
+#    sees on a timer, and answers questions. Leave it running.
+python -m sentinel.serve --seed --reset --watch coder_agent.py
 
-# 4. in another shell: an agent workload starts poking around the host. Keep it
-#    running, because `ask` judges what's happening *now* (memory is reference).
+# 4. in another shell: an agent workload starts poking around the host
 . .venv/bin/activate
-python scenario/coder_agent.py --mode unusual --hold 300 \
-  --touch /etc/passwd --touch /proc/1/status &
-curl -s localhost:9495/remember -d '{"watch":["coder_agent.py"],"label":"rogue-001"}'; echo
+python scenario/coder_agent.py --mode unusual &
 
-# 5. ask — a thin client to the service (~1s, no cognee cold start)
+# 5. ask
 python -m sentinel.ask --watch coder_agent.py \
-  "Does it look like this agent is trying to escape its sandbox?"     # -> YES
+  "Does it look like this agent is trying to escape its sandbox?"
 python -m sentinel.ask \
   "Is this box overloaded, or is this normal right now?"
 ```
 
-To build up "normal" history for comparison, record benign runs the same way (or
-`bash scenario/run_scenario.sh baseline benign-001`, which records through the
-service when it's up).
-
 Why a memory **service**: cognee's embedded store is single-writer, so one
-process must own it. That process both grows memory (the `--every` loop) and
-answers questions, which also makes `ask` fast. It mirrors the yeet side —
-reader is a service, memory is a service too. Without it running, the commands
-still work: `run_scenario.sh` records standalone and `ask` falls back to opening
-cognee directly.
+process must own it — it both grows memory and answers questions (which also
+makes `ask` fast). It mirrors the yeet side: reader is a service, memory is a
+service too. `scenario/run_scenario.sh baseline benign-001` records a labelled
+normal run for comparison. Without the service running, the commands still work
+standalone.
 
 ---
 

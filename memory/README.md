@@ -30,28 +30,23 @@ reader is a service, memory is a service too.)
 ```bash
 # 1. start the memory service — seeds policy + runbook, then loops + serves.
 #    Leave it running (its own shell; a systemd unit for real use).
-python -m sentinel.serve --seed --reset --watch coder_agent.py --every 5m
+python -m sentinel.serve --seed --reset --watch coder_agent.py
 
-# 2. in another shell (activate the venv again): a workload starts poking around.
-#    Keep it running -- ask judges the LIVE state; memory is only reference.
+# 2. in another shell (activate the venv again): a workload starts poking around
 . .venv/bin/activate
-python scenario/coder_agent.py --mode unusual --hold 300 \
-  --touch /etc/passwd --touch /proc/1/status &
-curl -s localhost:9495/remember -d '{"watch":["coder_agent.py"],"label":"rogue-001"}'; echo
+python scenario/coder_agent.py --mode unusual &
 
-# 3. ask while it's live — a thin client to the service (~1s, no cognee cold start)
+# 3. ask — a thin client to the service (~1s, no cognee cold start)
 python -m sentinel.ask --watch coder_agent.py \
-  "Does it look like this agent is trying to escape its sandbox?"     # -> YES
+  "Does it look like this agent is trying to escape its sandbox?"
 python -m sentinel.ask \
   "Is this box overloaded, or is this normal right now?"
 ```
 
-`ask` judges the **live** reading (what the workload is doing *now*); the
-recorded history and policy are reference for "is this normal / has this happened
-before". So ask while the workload is running. To build normal history for
-comparison, record benign runs the same way, or use
-`bash scenario/run_scenario.sh baseline benign-001` (which records through the
-service when it's up, then waits for its fixture to finish).
+`ask` judges the live reading, with the recorded history and policy as reference,
+so ask while the workload is running. `bash scenario/run_scenario.sh baseline
+benign-001` records a labelled normal run for comparison (through the service
+when it's up).
 
 The service's routes:
 
