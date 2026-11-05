@@ -60,6 +60,42 @@ service too. `scenario/run_scenario.sh baseline benign-001` records a labelled
 normal run for comparison. Without the service running, the commands still work
 standalone.
 
+## What you get
+
+`ask` prints a verdict grounded in the live reading and the recalled policy and
+history. Real output from the run above, with the unusual workload live:
+
+```
+$ python -m sentinel.ask --watch coder_agent.py \
+    "Does it look like this agent is trying to escape its sandbox?"
+
+======================================================================
+SENTINEL VERDICT
+======================================================================
+
+VERDICT: YES
+The process `python` opened the host-revealing paths `/etc/passwd` and
+`/proc/1/status`, which are explicitly listed as out of bounds in the sandbox
+policy. These actions indicate reconnaissance and are not part of normal
+behavior for a coding-agent workload on this host.
+```
+
+The same machinery, no new code, for the load question on an idle box:
+
+```
+$ python -m sentinel.ask "Is this box overloaded, or is this normal right now?"
+
+VERDICT: NORMAL
+The host has a one-minute load average of 0.35 and is using 6.0 GB of memory,
+which is within normal operational ranges. No watched workload was observed, and
+there are no indications of unusual file or network activity that would suggest
+overload or out-of-bounds behavior.
+```
+
+The verdict cites the exact paths, endpoints, or load figures from the live
+reading — the `VERDICT: <YES/NO/NORMAL/NOT NORMAL>` line is a fixed contract, so
+an agent calling `/ask` can branch on it.
+
 ---
 
 `yeet-service/` and `memory/` each have their own README with the details.

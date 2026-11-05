@@ -55,6 +55,14 @@ The service's routes:
 - `POST /remember {"watch": [...], "label": "..."}` → record one run now (what `run_scenario.sh` calls).
 - `--host`/`--port` to bind (default `127.0.0.1:9495`); `--no-loop` serves without the timer; `--seed`/`--reset` seed on start.
 
+Calling `/ask` directly (an agent can branch on the `VERDICT:` line):
+
+```console
+$ curl -s localhost:9495/ask \
+    -d '{"question":"is this agent escaping its sandbox?","watch":["coder_agent.py"]}'
+{"verdict": "VERDICT: YES\nThe process `python` opened the host-revealing paths `/etc/passwd` and `/proc/1/status`, which are explicitly listed as out of bounds in the sandbox policy. These actions indicate reconnaissance and are not part of normal behavior for a coding-agent workload on this host."}
+```
+
 `ask` talks to the service by default (`$SENTINEL_SERVE_URL` or
 `http://127.0.0.1:9495`). **Without the service running**, everything still
 works standalone: `run_scenario.sh` records with a one-shot collector and `ask`
