@@ -21,93 +21,73 @@ same machine the default (`http://127.0.0.1:9490/reading`) just works; point
 
 ## The loop
 
-The **memory service owns cognee**: it seeds the brain, records on a timer, and
-answers questions — all from one cognee instance. (cognee's embedded store is
-single-writer, so a long-running recorder and a separate `ask` in two processes
-would contend for one lock. One owner is the fix, and it mirrors the yeet side:
-reader is a service, memory is a service too.)
+The **memory service owns cognee**: it seeds the brain, records runs, answers
+questions and remembers reviews, all from one cognee instance. (cognee's
+embedded store is single-writer, so a long-running recorder and a separate
+`ask` in two processes would contend for one lock. One owner is the fix, and
+it mirrors the yeet side: reader is a service, memory is a service too.)
 
 ```bash
-# 1. start the memory service — seeds policy + runbook, then loops + serves.
-#    Leave it running (its own shell; a systemd unit for real use).
-python -m sentinel.serve --seed --reset --watch coder_agent.py
+# 1. start the memory service: seeds policy + runbook + generated known-good
+#    history, then serves. Leave it running (its own shell; a systemd unit for real use).
+python -m sentinel.serve --seed --reset --watch agent-        # add --every 5m to also record on a timer
 
-# 2. in another shell (activate the venv again): a workload starts poking around
-. .venv/bin/activate
-python scenario/coder_agent.py --mode unusual &
+# 2. in another shell (activate the venv again): a fleet of agents
+python scenario/fleet.py                                      # agent-04 breaks policy, agent-09 is odd
 
-# 3. ask — a thin client to the service (~1s, no cognee cold start)
-python -m sentinel.ask --watch coder_agent.py \
-  "Does it look like this agent is trying to escape its sandbox?"
-python -m sentinel.ask \
-  "Is this box overloaded, or is this normal right now?"
+# 3. remember their run: readings plus the activity log for the window
+curl -s localhost:9495/remember -d '{"watch":["agent-"],"label":"fleet"}'
+
+# 4. ask: a thin client to the service
+python -m sentinel.ask --watch agent-04 "Is this agent breaking the sandbox policy?"
+python -m sentinel.ask --watch agent-   "Which of these agents stand out, and why?"
+
+# 5. review a verdict by its id; the review is remembered
+python -m sentinel.ask --feedback <id> --correct --note "agent-04 is out of bounds"
 ```
 
-`ask` judges the live reading, with the recorded history and policy as reference,
-so ask while the workload is running. `bash scenario/run_scenario.sh baseline
-benign-001` records a labelled normal run for comparison (through the service
-when it's up).
+`ask` judges two fresh readings plus the last 90 seconds of the activity log
+(`--window`), with the recorded history, the policy and earlier reviews as
+reference, so ask while the workload is running.
 
 The service's routes:
 
 - `GET /healthz` — liveness.
-- `POST /ask {"question": "...", "watch": [...]}` → `{"verdict": "..."}`.
-- `POST /remember {"watch": [...], "label": "..."}` → record one run now (what `run_scenario.sh` calls).
-- `--host`/`--port` to bind (default `127.0.0.1:9495`); `--no-loop` serves without the timer; `--seed`/`--reset` seed on start.
+- `POST /ask {"question": "...", "watch": [...], "window": 90}` → `{"id", "verdict", "verdict_line", ...}`.
+- `POST /remember {"watch": [...], "label": "...", "samples": 3, "interval": 8, "lead": 30}` → record one run now.
+- `POST /feedback {"id": "...", "correct": true|false, "note": "..."}` → `202`, the review is remembered in the background.
+- `--host`/`--port` to bind (default `127.0.0.1:9495`); `--every` records on a timer; `--seed`/`--reset`/`--no-history` seed on start.
 
-Calling `/ask` directly (an agent can branch on the `VERDICT:` line):
+## What goes into memory
 
-```console
-$ curl -s localhost:9495/ask \
-    -d '{"question":"is this agent escaping its sandbox?","watch":["coder_agent.py"]}'
-{"verdict": "VERDICT: YES\nThe process `python` opened the host-revealing paths `/etc/passwd` and `/proc/1/status`, which are explicitly listed as out of bounds in the sandbox policy. These actions indicate reconnaissance and are not part of normal behavior for a coding-agent workload on this host."}
-```
+Everything is prose with stable entity names (the host, `agent-04`, a path, an
+endpoint), one document per run, because that is what cognee links across
+time. A run report has, per watched workload:
 
-`ask` talks to the service by default (`$SENTINEL_SERVE_URL` or
-`http://127.0.0.1:9495`). **Without the service running**, everything still
-works standalone: `run_scenario.sh` records with a one-shot collector and `ask`
-opens cognee directly (or pass `--standalone`). Seed separately in that case
-with `python -m sentinel.seed --reset`.
+- what it **held** across the readings: files, sockets, memory, fd count;
+- what it **did** in the window, from the activity log: programs run, files
+  opened inside and outside its workspace, host-revealing paths attempted
+  (an attempt counts even if the kernel refused), paths written, endpoints
+  dialled. Library loads and other noise every process makes are dropped.
 
-## What each module does
+Seeded alongside: `context/sandbox-policy.md`, `context/operations-log.md`,
+the generated baseline runs from `sentinel/history.py`, and any run reports
+you put in `history/`.
 
-| Module | Role |
+## Files
+
+| File | What it does |
 |---|---|
-| `sentinel/yeetq.py` | HTTP client for the reading service |
-| `sentinel/snapshot.py` | one reading → **prose** (stable entity names cognee can link) |
-| `sentinel/report.py` | a run's readings → one prose run report |
-| `sentinel/collector.py` | record **one** run → `cognee.remember()` (scenarios, seeding history) |
-| `sentinel/serve.py` | **the memory service**: owns cognee, loops + answers `/ask` |
-| `sentinel/seed.py` | ingest `context/*.md` (the company brain) |
-| `sentinel/ask.py` | thin client to the service (or standalone: reading + recall → verdict) |
-| `sentinel/llm.py` | a direct, controlled call to the local LLM for the verdict |
-
-The write path (remember) and the read path (retrieve, then reason) are
-deliberately separate roles — but one process owns the store. See the three-role
-table in the top-level README.
-
-## Useful flags
-
-```bash
-# record more/faster readings, or just print the prose without ingesting
-python -m sentinel.collector --watch coder_agent.py --label x --samples 6 --interval 5
-python -m sentinel.collector --watch coder_agent.py --label x --dry-run
-
-# ask a service on another host/port
-python -m sentinel.ask --server http://other-host:9495 --watch coder_agent.py "..."
-
-# standalone ask against a reader on another host/port, printing the full prompt
-python -m sentinel.ask --standalone --url http://other-host:9490/reading \
-  --watch coder_agent.py "..." --verbose
-```
-
-(`--url`, `--verbose` and `--dataset` apply to the standalone path; when asking
-the service, it uses the reader and dataset it was started with.)
-
-## The company brain
-
-`context/sandbox-policy.md` and `context/operations-log.md` are plain Markdown
-you edit to match your own host: what's out of bounds, what normal load looks
-like, what a deploy does. `seed.py` ingests them; everything the sentinel
-calls "normal" or "out of policy" traces back to these two files plus the
-recorded history.
+| `sentinel/serve.py` | the memory service: owns cognee; `/ask`, `/remember`, `/feedback` |
+| `sentinel/ask.py` | the question: live reading + activity, recall, verdict; also the feedback client |
+| `sentinel/collector.py` | record one run (readings + activity log) into cognee |
+| `sentinel/snapshot.py` | a reading as prose |
+| `sentinel/activity.py` | the activity log as prose: sorts actions into the sentences that matter |
+| `sentinel/report.py` | folds a run's readings and activity into one document |
+| `sentinel/history.py` | generates the known-good baseline runs for this host |
+| `sentinel/seed.py` | seeds policy, runbook, history |
+| `sentinel/llm.py` | the verdict model: whatever `LLM_*` cognee uses (Ollama native or OpenAI-compatible) |
+| `sentinel/yeetq.py` | HTTP client for the reader's `/reading` and `/activity` |
+| `scenario/coder_agent.py` | one agent fixture: `baseline`, `policy` or `suspicious` |
+| `scenario/fleet.py` | a fleet of them |
+| `scenario/run_scenario.sh` | one agent, recorded as a labelled run |

@@ -4,7 +4,8 @@ enabled = true
 working-directory = "."
 
 # The reader: owns the `http` portal, assembles a host reading per request
-# from the system graph. By default each reading is stamped with the machine's
+# from the system graph, and keeps the activity log (three BPF tracepoints:
+# exec, openat, TCP connect) that /activity answers from. By default each reading is stamped with the machine's
 # own name (the cognee side fills it in), which is all a single-box demo needs.
 # To stamp a specific name instead -- e.g. when the cognee side runs elsewhere,
 # so readings link to the right host -- add: args = ["--hostname", "my-box"]
@@ -28,3 +29,9 @@ target = "serve"
 portal = "http"
 tenancy = "shared"
 description = "Same as /: whole-box state + watched workloads in full + top background procs"
+
+[units.web.routes."/activity"]
+target = "serve"
+portal = "http"
+tenancy = "shared"
+description = "What watched workloads did: every exec, open and connect since ?since=<ms>, children included"

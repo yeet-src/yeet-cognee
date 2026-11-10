@@ -12,7 +12,7 @@ import { SYSTEM, PROCS, TCP, procDetail } from "./queries.js";
 // Processes that are part of the sentinel itself, never reported as a
 // watched workload so the tools never observe themselves. Extendable via
 // the `self` query parameter.
-const DEFAULT_SELF = ["sentinel.collector", "sentinel.ask", "sentinel.seed", "-m sentinel"];
+const DEFAULT_SELF = ["sentinel.", "-m sentinel", "scenario/fleet.py", "demo.sh", "/ask", "/remember", "/activity", "/reading"];
 
 async function query(gql) {
   const { data, errors } = await yeet.graph.query(gql);

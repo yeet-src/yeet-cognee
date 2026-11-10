@@ -24,7 +24,7 @@ from .yeetq import Yeet
 
 # Processes that are part of the sentinel itself -- excluded from watch
 # matching so the collector and ask tools never observe themselves.
-SELF_MARKERS = ("sentinel.collector", "sentinel.ask", "sentinel.seed", "-m sentinel")
+SELF_MARKERS = ("sentinel.", "-m sentinel", "scenario/fleet.py", "demo.sh", "/ask", "/remember", "/activity", "/reading")
 
 # --------------------------------------------------------------------------
 # Interpretation helpers -- facts only, no verdicts
@@ -109,6 +109,19 @@ def human_duration(seconds: float | None) -> str:
 
 def joined_cmdline(cmdline: list[str] | None) -> str:
     return " ".join(cmdline) if cmdline else ""
+
+
+def workload_name(comm: str | None, cmdline: list[str] | None) -> str:
+    """A stable name for a workload: its `--name` if it has one (the fixtures
+    do), else the process name. Ten agents that are all `python` are hard to
+    tell apart in memory; `agent-04` is one entity across every run."""
+    args = cmdline or []
+    for i, a in enumerate(args):
+        if a == "--name" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--name="):
+            return a.split("=", 1)[1]
+    return comm or "unknown"
 
 
 # --------------------------------------------------------------------------

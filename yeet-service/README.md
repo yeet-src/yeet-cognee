@@ -1,17 +1,30 @@
 # yeet-service — the sysgraph reader
 
 This is the **yeet side** of the sentinel: a yeet service that reads the
-system graph and serves one complete host reading as JSON over HTTP. It is
-ground truth and nothing more — no interpretation happens here.
+system graph and serves one complete host reading as JSON over HTTP, and
+keeps an activity log of what processes do, from three BPF tracepoints. It
+is ground truth and nothing more — no interpretation happens here.
 
 ## What it exposes
 
 ```
 GET /                         a complete host reading, JSON
 GET /reading                  same thing (named alias)
-GET /reading?watch=coder.py   also pull that workload in full (fds, io, sockets)
+GET /reading?watch=agent-04   also pull that workload in full (fds, io, sockets)
 GET /reading?watch=a,b&top=8  several workloads; more background processes
+GET /activity?watch=agent-&since=<epoch ms>[&until=<ms>&limit=N]
+                              what those workloads did since then: every exec,
+                              open (with access mode) and TCP connect, children
+                              folded into the parent that spawned them
 ```
+
+The activity log comes from `bpf/activity.bpf.c`: `sched_process_exec`,
+`sys_enter_openat` and `inet_sock_set_state` (SYN_SENT) write into ring
+buffers the isolate drains into a bounded in-memory log (`--log-capacity`,
+default 500k events; opens of shared libraries and other per-process noise
+are dropped at ingest). An open is recorded whether or not the kernel allowed
+it. The compiled `activity.bpf.o` is CO-RE and checked in; `make` rebuilds it
+(needs clang and bpftool).
 
 A reading is:
 
@@ -34,8 +47,10 @@ Query parameters:
 
 | File | What it does |
 |---|---|
-| `service.toml` | the service manifest: one `serve` unit, a web server, two routes |
-| `reading.js` | the HTTP portal — parses the request, calls `reading()`, writes JSON |
+| `service.toml` | the service manifest: one `serve` unit, a web server, three routes |
+| `reading.js` | the HTTP portal — parses the request, calls `reading()` or `activity()`, writes JSON |
+| `lib/activity.js` | the activity log: loads the BPF object, drains the ring buffers, attributes events to watched processes |
+| `bpf/activity.bpf.c`, `activity.bpf.o`, `Makefile` | the three tracepoint programs and their build |
 | `lib/queries.js` | the GraphQL run against `yeet.graph` (host, procs, tcp, per-proc detail) |
 | `lib/assemble.js` | runs the queries, matches watched procs, attributes sockets, ranks the rest |
 

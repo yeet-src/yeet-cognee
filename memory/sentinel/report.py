@@ -8,13 +8,19 @@ about runs, not instants -- and it keeps the number of cognify() passes
 
 from __future__ import annotations
 
+from .activity import Activity, render_activity, render_compact, summarize_all
 from .snapshot import (
     Snapshot,
     describe_endpoint,
     human_bytes,
     is_sensitive,
     joined_cmdline,
+    workload_name,
 )
+
+
+# More watched workloads than this in one run and the report goes compact.
+COMPACT_ABOVE = 3
 
 
 def _num(v) -> str:
@@ -31,8 +37,13 @@ def _fmt_range(values: list[float], fmt=_num) -> str:
     return fmt(lo) if lo == hi else f"{fmt(lo)} to {fmt(hi)}"
 
 
-def render_run_report(snaps: list[Snapshot]) -> str:
-    """Render the union of everything observed during one run, as English."""
+def render_run_report(snaps: list[Snapshot], activity: dict | None = None,
+                      workspace_roots: tuple[str, ...] = ()) -> str:
+    """Render the union of everything observed during one run, as English.
+
+    `activity` is the reader's /activity payload for the run's window: what
+    the watched processes did between the readings. Without it the report
+    is snapshots only, as before."""
     if not snaps:
         return ""
 
@@ -47,7 +58,9 @@ def render_run_report(snaps: list[Snapshot]) -> str:
         f"This is a record of the observation run labelled `{label}`, which took "
         f"place on host {host} between {start} and {end}. It was assembled from "
         f"{len(snaps)} readings of the yeet system graph, which observes the "
-        f"kernel directly. Everything stated here is measured, not inferred."
+        f"kernel directly. Everything stated here is measured, not inferred. It is "
+        f"an observation, not a reviewed or approved run: nothing in it is known to "
+        f"be acceptable unless a human review says so."
     )
 
     # ---- host conditions during the run ----
@@ -89,7 +102,8 @@ def render_run_report(snaps: list[Snapshot]) -> str:
         for proc in s.watched:
             by_pid.setdefault(proc["pid"], []).append(proc)
 
-    if not by_pid:
+    acts: list[Activity] = summarize_all(activity, workspace_roots)
+    if not by_pid and not acts:
         lines.append("")
         lines.append(
             f"No watched workload was observed on {host} during run `{label}`."
@@ -97,8 +111,40 @@ def render_run_report(snaps: list[Snapshot]) -> str:
         lines.append("")
         return "\n".join(lines)
 
+    # Many workloads at once (a fleet): one paragraph each, so the document
+    # stays small enough to cognify quickly. Few: the full prose.
+    by_act = {a.pid: a for a in acts}
+    compact = len(set(by_pid) | set(by_act)) > COMPACT_ABOVE
+    if compact:
+        lines.append("")
+        lines.append(
+            f"Run `{label}` covered {len(set(by_pid) | set(by_act))} workloads at once. Each is "
+            f"described in one paragraph: what it held across the readings and what it did."
+        )
+        for pid in sorted(set(by_pid) | set(by_act)):
+            act = by_act.get(pid)
+            held = (by_pid.get(pid) or [None])[-1]
+            if act:
+                lines.extend(render_compact(host, label, act, held))
+            else:
+                lines.extend(_render_workload(host, label, pid, by_pid[pid], len(snaps)))
+        lines.append("")
+        return "\n".join(lines)
+
     for pid, observations in by_pid.items():
         lines.extend(_render_workload(host, label, pid, observations, len(snaps)))
+
+    # ---- what they did between the readings ----
+    window = f"run `{label}` ({start} to {end})"
+    for act in acts:
+        lines.extend(render_activity(host, label, act, window))
+    if by_pid and not acts and activity is not None:
+        lines.append("")
+        lines.append(
+            f"The activity log recorded no actions by the watched workloads on {host} "
+            f"during run `{label}`: they ran no programs, opened no files and made no "
+            f"connections in that window."
+        )
 
     lines.append("")
     return "\n".join(lines)
@@ -109,7 +155,7 @@ def _render_workload(
 ) -> list[str]:
     first = obs[0]
     status = first.get("status") or {}
-    name = status.get("name") or "unknown"
+    name = workload_name(status.get("name"), first.get("cmdline"))
     cmd = joined_cmdline(first.get("cmdline"))
 
     out: list[str] = []
@@ -117,8 +163,8 @@ def _render_workload(
     out.append(f"## Workload `{name}` during run `{label}`")
     out.append("")
     out.append(
-        f"During run `{label}` on host {host}, the process `{name}` ran as pid "
-        f"{pid} under uid {first.get('uid')}. Its executable was "
+        f"During run `{label}` on host {host}, the workload `{name}` (process "
+        f"`{status.get('name')}`) ran as pid {pid} under uid {first.get('uid')}. Its executable was "
         f"`{first.get('exe')}`. It was launched with the command line `{cmd}`, "
         f"and its working directory was `{first.get('cwd')}`. It was observed in "
         f"{len(obs)} of the {total_samples} readings taken during the run."

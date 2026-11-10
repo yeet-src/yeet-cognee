@@ -3,21 +3,29 @@
  *   GET /                         a complete host reading, JSON
  *   GET /reading?watch=coder.py   the same, with that workload pulled in full
  *   GET /reading?watch=a,b&top=8  several workloads, more background processes
+ *   GET /activity?watch=coder.py&since=<ms>   what those workloads did since then:
+ *                                 every exec, open and connect, children included
  *
  * A reading is kernel ground truth assembled into one JSON object: whole-box
  * state (load, memory, GPU), each watched process in full (fds, io, sockets
- * attributed by inode), and the largest other processes. No interpretation --
- * the cognee side turns this into prose and judges it.
+ * attributed by inode), and the largest other processes. The activity log
+ * is the same truth over time: the actions a reading cannot show because
+ * they were over before it was taken. No interpretation -- the cognee side
+ * turns both into prose and judges them.
  *
  * The hostname is passed in from service.toml (`--hostname <name>`) so every
  * reading is stamped with the box's own name, which is what lets cognee link
  * observations of the same host across time.
  */
 
+import { activity, start as startActivityLog } from "./lib/activity.js";
 import { reading } from "./lib/assemble.js";
 
 const args = yeet.args ?? {};
 const HOSTNAME = args.hostname ?? null;
+// The sentinel's own processes, and anything that merely names a workload
+// in its command line (the curl that asks about `agent-04` is not agent-04).
+const DEFAULT_SELF = ["sentinel.", "-m sentinel", "scenario/fleet.py", "demo.sh", "/ask", "/remember", "/activity", "/reading"];
 
 function parse(url) {
   const [path, qs = ""] = String(url ?? "/").split("?", 2);
@@ -36,8 +44,19 @@ function list(value) {
 
 async function respond(peer, url) {
   const { path, params } = parse(url);
+  if (path === "/activity") {
+    const since = params.has("since") ? Number(params.get("since")) : Date.now() - 60_000;
+    const until = params.has("until") ? Number(params.get("until")) : Infinity;
+    if (!Number.isFinite(since) || Number.isNaN(until)) throw new Error("since/until must be epoch milliseconds");
+    return peer.write(JSON.stringify(await activity({
+      watch: list(params.get("watch")),
+      self: [...DEFAULT_SELF, ...list(params.get("self"))],
+      since, until,
+      limit: params.has("limit") ? Number(params.get("limit")) : 2000,
+    })));
+  }
   if (path !== "/" && path !== "/reading") {
-    return peer.write(`no such route: ${path}\nroutes: / /reading (?watch=substr,substr ?self=substr ?top=N)\n`);
+    return peer.write(`no such route: ${path}\nroutes: / /reading (?watch=substr,substr ?self=substr ?top=N) /activity (?watch= ?since=ms ?until=ms ?limit=N)\n`);
   }
   const opts = {
     watch: list(params.get("watch")),
@@ -51,6 +70,8 @@ async function respond(peer, url) {
   peer.write(JSON.stringify(await reading(opts)));
 }
 
+await startActivityLog();
+
 const portal = new Portal("http");
 portal.on("peer", async (peer, request) => {
   try {
@@ -62,4 +83,4 @@ portal.on("peer", async (peer, request) => {
   }
 });
 
-console.log(`sysgraph: serving / and /reading on portal http (hostname: ${HOSTNAME ?? "unset"})`);
+console.log(`sysgraph: serving /, /reading and /activity on portal http (hostname: ${HOSTNAME ?? "unset"})`);

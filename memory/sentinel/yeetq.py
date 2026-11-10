@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -32,16 +33,7 @@ class Yeet:
         self.url = url or os.environ.get("SENTINEL_READING_URL") or DEFAULT_URL
         self.timeout = timeout
 
-    def reading(self, watch: list[str], self_markers: list[str] | None = None,
-                top_other: int = 5) -> dict:
-        """One complete host reading: whole-box state, watched workloads in
-        full (with sockets attributed), and the largest background processes."""
-        params = {"top": str(top_other)}
-        if watch:
-            params["watch"] = ",".join(watch)
-        if self_markers:
-            params["self"] = ",".join(self_markers)
-        url = f"{self.url}?{urllib.parse.urlencode(params)}"
+    def _get(self, url: str) -> dict:
         try:
             with urllib.request.urlopen(url, timeout=self.timeout) as resp:
                 body = resp.read().decode("utf-8")
@@ -57,3 +49,28 @@ class Yeet:
         if isinstance(payload, dict) and payload.get("error"):
             raise YeetError(str(payload["error"]))
         return payload
+
+    def reading(self, watch: list[str], self_markers: list[str] | None = None,
+                top_other: int = 5) -> dict:
+        """One complete host reading: whole-box state, watched workloads in
+        full (with sockets attributed), and the largest background processes."""
+        params = {"top": str(top_other)}
+        if watch:
+            params["watch"] = ",".join(watch)
+        if self_markers:
+            params["self"] = ",".join(self_markers)
+        return self._get(f"{self.url}?{urllib.parse.urlencode(params)}")
+
+    def activity(self, watch: list[str], since_ms: int, until_ms: int | None = None,
+                 self_markers: list[str] | None = None, limit: int = 2000) -> dict:
+        """What the watched workloads (and their children) did since `since_ms`:
+        every exec, open and connect the kernel saw, from the reader's log."""
+        params = {"since": str(int(since_ms)), "limit": str(limit)}
+        if until_ms is not None:
+            params["until"] = str(int(until_ms))
+        if watch:
+            params["watch"] = ",".join(watch)
+        if self_markers:
+            params["self"] = ",".join(self_markers)
+        base = self.url.rsplit("/", 1)[0] if self.url.rstrip("/").endswith("/reading") else self.url.rstrip("/")
+        return self._get(f"{base}/activity?{urllib.parse.urlencode(params)}")

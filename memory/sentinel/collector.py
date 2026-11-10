@@ -19,7 +19,7 @@ import sys
 import time
 
 from .report import render_run_report
-from .snapshot import Snapshot, render, take
+from .snapshot import SELF_MARKERS, Snapshot, render, take
 from .yeetq import Yeet, YeetError
 
 SNAPSHOT_DIR = pathlib.Path(__file__).resolve().parent.parent / "snapshots"
@@ -59,12 +59,40 @@ def collect(
     return snaps
 
 
+def collect_run(
+    yeet: Yeet,
+    watch: list[str],
+    label: str,
+    samples: int,
+    interval: float,
+    hostname: str | None,
+    lead_ms: int = 30_000,
+) -> tuple[list[Snapshot], dict | None]:
+    """A run: several readings, then the activity log for the same window.
+
+    The readings say what the workload held; the log says what it did, so a
+    file read and closed between two readings still ends up in the report.
+    `lead_ms` widens the window backwards, for actions taken just before the
+    first reading; the default covers one of the fixtures' work cycles."""
+    started = int(time.time() * 1000) - lead_ms
+    snaps = collect(yeet, watch, label, samples, interval, hostname)
+    activity = None
+    if watch:
+        try:
+            activity = yeet.activity(watch, started, self_markers=list(SELF_MARKERS))
+            n = activity.get("events", 0)
+            print(f"  activity: {n} actions by {len(activity.get('processes') or [])} watched processes")
+        except YeetError as exc:
+            print(f"  activity log unavailable: {exc}", file=sys.stderr)
+    return snaps, activity
+
+
 async def ingest(text: str, dataset: str) -> None:
     import cognee
 
     print(f"\nHanding {len(text)} characters of prose to cognee (dataset `{dataset}`)...")
     started = time.monotonic()
-    await cognee.remember(text, dataset_name=dataset)
+    await cognee.remember(text, dataset_name=dataset, self_improvement=False)
     print(f"cognee remembered it in {time.monotonic() - started:.1f}s")
 
 
@@ -74,7 +102,8 @@ def record_once(yeet: Yeet, args: argparse.Namespace, label: str) -> bool:
     Returns True if something was recorded, False if no readings were taken
     (so a loop can log it and carry on rather than die)."""
     print(f"Collecting run `{label}` ({args.samples} readings, {args.interval}s apart)")
-    snaps = collect(yeet, args.watch, label, args.samples, args.interval, args.hostname)
+    snaps, activity = collect_run(yeet, args.watch, label, args.samples, args.interval, args.hostname,
+                                  lead_ms=int(args.lead * 1000))
     if not snaps:
         print("No readings taken.", file=sys.stderr)
         return False
@@ -82,7 +111,7 @@ def record_once(yeet: Yeet, args: argparse.Namespace, label: str) -> bool:
     SNAPSHOT_DIR.mkdir(exist_ok=True)
     docs = (
         [render(s) for s in snaps] if args.per_snapshot
-        else [render_run_report(snaps)]
+        else [render_run_report(snaps, activity)]
     )
 
     for n, doc in enumerate(docs):
@@ -109,6 +138,8 @@ def main() -> int:
     ap.add_argument("--label", default="run", help="run label, e.g. benign-001")
     ap.add_argument("--samples", type=int, default=4, help="readings per run (default 4)")
     ap.add_argument("--interval", type=float, default=8.0, help="seconds between readings")
+    ap.add_argument("--lead", type=float, default=30.0,
+                    help="seconds of activity before the first reading to include (default 30)")
     ap.add_argument("--dataset", default="sysgraph", help="cognee dataset name")
     ap.add_argument("--url", default=None,
                     help="sysgraph service URL (default $SENTINEL_READING_URL or http://127.0.0.1:9490/reading)")
