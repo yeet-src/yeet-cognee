@@ -22,3 +22,8 @@ memory/rules.json
 
 # demo.sh logs
 .demo/
+
+# the demo's baseline archive, built locally (it is machine + model specific)
+memory/baseline/
+# cognee's live graph + vector store (rebuilt from context/ or the baseline)
+memory/.cognee-store/

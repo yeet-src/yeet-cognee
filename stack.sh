@@ -7,11 +7,16 @@ LEARN=${LEARN:-45}
 KEEP=0
 SETUP=1
 ENFORCE=${ENFORCE:-0}
+REPLAY=${REPLAY:-}
+SPEED=${SPEED:-1}
 PY="$PWD/memory/.venv/bin/python"
 SERVER="${SENTINEL_SERVER_URL:-http://127.0.0.1:9495}"
 READER="${SENTINEL_READER_URL:-http://127.0.0.1:9490}"
 LOG=.demo
 mkdir -p "$LOG"
+BASELINE="$PWD/memory/baseline/baseline.tar.gz"
+REBASELINE=0
+RESTORE=0
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 step() { printf '   %s\n' "$*"; }
@@ -23,6 +28,8 @@ parse_args() {
       --keep) KEEP=1 ;;
       --skip-setup) SETUP=0 ;;
       --enforce) ENFORCE=1 ;;
+      --rebaseline) REBASELINE=1 ;;
+      --speed=*) SPEED="${arg#*=}" ;;
       --agents) ;;
       [0-9]*) AGENTS="$arg" ;;
       -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
@@ -40,6 +47,18 @@ teardown() {
 }
 
 sentinel() { ( cd memory && "$PY" -m sentinel "$@" ); }
+
+# A saved baseline is the seeded policy plus the clean-fleet profile. Restoring
+# it skips both slow, model-bound steps and starts every demo identically.
+plan_memory() {
+  RESTORE=0
+  if [ -f "$BASELINE" ] && [ "$REBASELINE" = 0 ]; then
+    RESTORE=1
+    say "using the saved baseline memory (instant; --rebaseline to rebuild)"
+  elif [ "$REBASELINE" = 1 ]; then
+    say "rebuilding the baseline from context/ + a clean fleet"
+  fi
+}
 
 fleet() {
   ( cd memory && exec "$PY" scenario/fleet.py --agents "$AGENTS" --cycle 15 "$@" ) > "$LOG/fleet.log" 2>&1 &
@@ -75,14 +94,20 @@ setup_cognee() {
   [ -x "$PY" ] || "$(command -v python3.13 || command -v python3.12 || command -v python3)" -m venv memory/.venv
   "$PY" -c "import cognee" 2>/dev/null || { step "installing cognee (a few minutes the first time)"; "$PY" -m pip install -q -r memory/requirements.txt; }
   step "cognee $("$PY" -c 'import importlib.metadata as m; print(m.version("cognee"))')"
-  rm -f memory/profiles/*.json memory/rules.json memory/verdicts.jsonl memory/findings.jsonl
+  rm -f memory/rules.json memory/verdicts.jsonl memory/findings.jsonl
+  [ "$RESTORE" = 1 ] || rm -f memory/profiles/*.json
 }
 
 start_sentinel() {
-  say "starting the sentinel$([ "$SETUP" = 1 ] && echo ' (seeding the policy; minutes on a local model)')"
-  local seed=""; [ "$SETUP" = 1 ] && seed="--seed --reset"
+  local init note
+  if [ "$RESTORE" = 1 ]; then init="--restore"; note=" (restoring baseline)"
+  elif [ "$SETUP" = 1 ]; then init="--seed --reset"; note=" (seeding the policy; minutes on a local model)"
+  else init=""; note=""; fi
+  say "starting the sentinel$note"
   local enf=""; [ "${ENFORCE:-0}" = 1 ] && enf="--enforce"
-  ( cd memory && exec "$PY" -m sentinel.serve $seed --watch agent- $enf --every 60 ) > "$LOG/serve.log" 2>&1 &
+  local rep=""; [ -n "$REPLAY" ] && rep="--replay $REPLAY --speed $SPEED"
+  local snap="--snapshot $PWD/$LOG/memory-graph.html"
+  ( cd memory && exec "$PY" -m sentinel.serve $init $rep $snap --watch agent- $enf --every 60 ) > "$LOG/serve.log" 2>&1 &
   SERVE_PID=$!
   for _ in $(seq 1 600); do
     curl -sf -m 2 "$SERVER/healthz" >/dev/null && break
@@ -93,8 +118,16 @@ start_sentinel() {
 }
 
 learn_from_clean_fleet() {
+  if [ "$RESTORE" = 1 ]; then step "baseline restored; skipping the clean-fleet learning"; return 0; fi
   say "learning what a well-behaved fleet does ($AGENTS clean agents for ${LEARN}s)"
   fleet --clean --hold "$LEARN"
   wait "$FLEET_PID"; FLEET_PID=""
   sentinel learn --watch agent- --seconds $((LEARN + 5)) | sed 's/^/   /'
+}
+
+# Capture the policy + profile just built so the next run restores in a second.
+save_baseline() {
+  [ "$RESTORE" = 1 ] && return 0
+  say "saving this baseline for instant restarts"
+  ( cd memory && "$PY" -m sentinel.baseline save ) | sed 's/^/   /'
 }

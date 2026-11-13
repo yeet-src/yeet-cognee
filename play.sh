@@ -7,6 +7,7 @@
 #   ./play.sh --skip-setup    # venv, cognee and seed already done
 #   ./play.sh --enforce       # actually block denied opens, don't just flag them
 #   ./play.sh --keep          # leave the stack running after you quit
+#   ./play.sh --rebaseline    # rebuild the saved baseline from scratch
 #
 # In the agent shell, try: cat .aws/credentials; curl https://1.1.1.1;
 # cp /usr/bin/true ./x. The console shows each finding and a verdict; type
@@ -17,10 +18,12 @@ parse_args "$@"
 trap teardown EXIT
 
 prerequisites
+plan_memory
 start_reader
 setup_cognee
 start_sentinel
-[ -f memory/profiles/agent.json ] && step "using the existing agent profile" || learn_from_clean_fleet
+learn_from_clean_fleet
+save_baseline
 
 say "your turn"
 if command -v tmux >/dev/null && [ -z "${TMUX:-}" ]; then

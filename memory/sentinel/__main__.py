@@ -79,19 +79,16 @@ def report(observed: dict, args: argparse.Namespace) -> None:
         print(f"\n{pretty.decision_banner(answer.get('decision'))}  {answer['verdict']}\n(verdict {answer['id']})\n", flush=True)
 
 
-HELP = """commands (ids are the numbers beside each finding; omit to mean all):
-  review             open the panel: toggle good/bad on each finding, r for a reason
-  bad [ids] [note]   those findings are incidents: compile a rule from them and your note
-  good [ids]         those findings are fine: add them to the profile as normal
-  deny <path> [why]  forbid a path right now, no verdict needed (e.g. a file you just saw read)
-  verbose            toggle every file open, exec and connect (off by default)
-  ask <question>     ask about the watched workloads now
-  rules              the rules in force
-  quit
+HELP = """when something is flagged, you decide (# = the number beside a finding; omit # to mean all):
+  bad <#> <why>      it's an incident → becomes a standing rule       e.g.  bad 1 the docker socket is off limits
+  good <#>           it's fine        → added to the agent's profile   e.g.  good 2 3
+  review             a panel to toggle good/bad per finding and add a reason
 
-  e.g.  good 2 3           cat and ls are fine for this agent
-        bad 1 4 .aws and .ssh are off limits
-        deny ~/jacob-secret.txt my personal secret"""
+  ask <question>     ask about the watched agents right now
+  deny <path> [why]  forbid a path immediately, no verdict needed      e.g.  deny ~/secret.txt personal
+  rules              show the rules in force
+  verbose            show every file open, exec and connect (off by default)
+  quit"""
 
 
 def split_ids(rest: str) -> tuple[list[int], str]:
@@ -127,7 +124,7 @@ class Console:
         if needs:
             lines.append("")
             lines += [pretty.numbered_finding(i, f) for i, f in enumerate(self.findings, 1)]
-            lines.append(f"{pretty.GREY}verdict {self.last}: `review` to decide, or `bad <ids> <why>` / `good <ids>`{pretty.RESET}")
+            lines.append(f"{pretty.GREY}→ your call:  bad <#> <why>   (e.g. bad 1 the docker socket is off limits)   •   good <#>  if it's fine   •   review  for a panel{pretty.RESET}")
         self.say("\n".join(lines))
 
     def open_panel(self) -> None:
@@ -192,7 +189,9 @@ class Console:
 
     def run(self) -> int:
         threading.Thread(target=self.follow, daemon=True).start()
-        self.say(f"following {', '.join(self.args.watch) or 'everything'}. {HELP}")
+        watching = ", ".join(self.args.watch) or "everything"
+        intro = f"Watching {watching}. I summarise what each one does, flag anything off, and ask you to decide."
+        self.say(f"{pretty.BOLD}{intro}{pretty.RESET}\n\n{HELP}")
         try:
             while True:
                 line = input().strip()

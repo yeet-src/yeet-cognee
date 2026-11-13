@@ -10,5 +10,5 @@ async def seed(reset: bool, dataset: str) -> list[str]:
         await cognee.forget(everything=True)
     documents = sorted(CONTEXT.glob("*.md"))
     for document in documents:
-        await cognee.remember(document.read_text(), dataset_name=dataset, self_improvement=False)
+        await cognee.remember(document.read_text(), dataset_name=dataset, self_improvement=False, node_set=["policy"])
     return [d.name for d in documents]

@@ -77,8 +77,8 @@ def within_profile(acts: list[Activity]) -> str:
     return f"VERDICT: NO\n{names} stayed within the learned profile and the policy: nothing was run, opened or dialled that the profile does not already allow."
 
 
-async def recall(dataset: str, query: str | None = None) -> str:
+async def recall(dataset: str, query: str | None = None, node_name: list[str] | None = None) -> str:
     import cognee
 
-    results = await cognee.recall(query_text=query or RETRIEVAL_QUERY, datasets=[dataset], top_k=20, only_context=True)
+    results = await cognee.recall(query_text=query or RETRIEVAL_QUERY, datasets=[dataset], top_k=20, only_context=True, node_name=node_name)
     return "\n\n".join(text for text in (getattr(r, "text", None) or str(r) for r in results) if text.strip())

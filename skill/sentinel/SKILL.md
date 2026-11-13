@@ -21,18 +21,32 @@ and history, not a metrics lookup. Three parts:
 Everything runs on the host being watched. Layout: `yeet-service/` (the
 reader), `memory/` (the sentinel, Python), `demo.sh`.
 
-## Run the demo
+## Run it without a kernel (easiest)
+
+```bash
+./replay.sh
+```
+
+Replays a recorded trace of an agent fleet through the real sentinel — no
+yeetd, no root, no fleet, only Python and the model in `memory/.env`. The
+first run builds a baseline from the trace and saves it; later runs restore it
+in a second. The console plays the trace: `agent-03` breaks policy, `agent-05`
+looks suspicious, `agent-06` repeats `agent-03`. Use this when the user wants
+to try it, or when there is no yeet daemon on the host.
+
+## Run the full demo (live kernel)
 
 ```bash
 ./demo.sh --keep
 ```
 
-It applies the reader, sets up the venv, starts the sentinel (seeding the
-policy takes a minute or two on a local model), learns from a clean fleet,
-starts a fleet where `agent-04` breaks policy and the last agent is odd,
-prints one verdict and confirms it. `--keep` leaves it running. It checks for
-yeet 0.25+ with `yeetd`, python3, and the LLM in `memory/.env`; if it reports
-no Ollama, tell the user to start one or set `LLM_*` to another provider.
+It applies the reader, sets up the venv, builds the baseline the first time
+(seeding the policy takes a minute or two on a local model; later runs restore
+it in a second), learns from a clean fleet, starts a fleet where `agent-04`
+breaks policy and the last agent is odd, prints one verdict and confirms it.
+`--keep` leaves it running. It checks for yeet 0.25+ with `yeetd`, python3, and
+the LLM in `memory/.env`; if it reports no Ollama, tell the user to start one
+or set `LLM_*` to another provider.
 
 ## Answer a question
 
@@ -47,8 +61,9 @@ cd memory && .venv/bin/python -m sentinel ask --watch agent-05 \
   `agent-` is the whole fleet. Repeatable.
 - `--window <seconds>` is how much activity to judge (default 90).
 
-It prints the verdict and an id. Relay the verdict and the facts it cites.
-Say whether each finding is a **policy violation** or **suspicious**.
+It prints the verdict, led by a one-line banner (DECISION NEEDED or no action
+needed) and an id. Relay the banner, the verdict and the facts it cites, and
+say whether each finding **broke a rule** or is just **unusual**.
 
 ## Record a review
 

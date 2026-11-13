@@ -24,17 +24,26 @@ class Memory:
     def seed(self, reset: bool) -> list[str]:
         return self._call(lambda: seed(reset, self.dataset))
 
-    def remember(self, text: str) -> None:
+    def remember(self, text: str, node_set: list[str] | None = None) -> None:
         import cognee
 
-        self._call(lambda: cognee.remember(text, dataset_name=self.dataset, self_improvement=False))
+        self._call(lambda: cognee.remember(text, dataset_name=self.dataset, self_improvement=False, node_set=node_set))
 
-    def remember_later(self, text: str, name: str) -> None:
-        threading.Thread(target=self.remember, args=(text,), name=name, daemon=True).start()
+    def remember_later(self, text: str, name: str, node_set: list[str] | None = None) -> None:
+        threading.Thread(target=self.remember, args=(text, node_set), name=name, daemon=True).start()
 
-    def recall(self, query: str | None = None) -> str:
+    def recall(self, query: str | None = None, node_name: list[str] | None = None) -> str:
         try:
-            return self._call(lambda: recall(self.dataset, query))
+            return self._call(lambda: recall(self.dataset, query, node_name))
         except Exception as exc:  # an empty or not-yet-seeded store should not fail a verdict
             print(f"[memory] recall unavailable: {exc}", flush=True)
             return ""
+
+    def snapshot(self, path: str) -> str | None:
+        import cognee
+
+        try:
+            return self._call(lambda: cognee.visualize_graph(path, dataset=self.dataset))
+        except Exception as exc:  # a picture of the graph is a nicety, never worth failing for
+            print(f"[memory] graph snapshot unavailable: {exc}", flush=True)
+            return None

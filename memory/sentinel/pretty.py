@@ -23,15 +23,19 @@ def workload_line(name: str, summary: str) -> str:
     return f"{GREY}{stamp()}{RESET}  {CYAN}{BOLD}{name:<11}{RESET}{emphasize(summary)}"
 
 
+def kind_label(kind: str) -> str:
+    return "broke a rule" if kind == "policy" else "unusual"
+
+
 def finding_line(f: dict) -> str:
     base = RED if f["kind"] == "policy" else YELLOW
-    tag = "POLICY" if f["kind"] == "policy" else "novel"
-    return f"{GREY}{stamp()}{RESET}  {base}{BOLD}{tag:<6}{RESET} {CYAN}{f['workload']:<11}{RESET}{base}{emphasize(f['what'], base)}{RESET}"
+    tag = "BROKE RULE" if f["kind"] == "policy" else "UNUSUAL"
+    return f"{GREY}{stamp()}{RESET}  {base}{BOLD}{tag:<10}{RESET} {CYAN}{f['workload']:<11}{RESET}{base}{emphasize(f['what'], base)}{RESET}"
 
 
 def numbered_finding(i: int, f: dict) -> str:
     base = RED if f["kind"] == "policy" else YELLOW
-    return f"  {BOLD}{i:>2}.{RESET} {base}{emphasize(f['what'], base)}{RESET}  {GREY}[{f['kind']}] {f['workload']}{RESET}"
+    return f"  {BOLD}{i:>2}.{RESET} {base}{emphasize(f['what'], base)}{RESET}  {GREY}({kind_label(f['kind'])} — {f['workload']}){RESET}"
 
 
 def event_line(ev: dict) -> str:

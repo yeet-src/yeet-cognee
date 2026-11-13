@@ -8,6 +8,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import baseline
 from . import deny as denylist
 from . import rules
 from .activity import Activity, brief, role_of, summarize
@@ -16,6 +17,7 @@ from .llm import describe as describe_llm
 from .memory import Memory
 from .profile import Finding, Profile
 from .reader import Reader
+from .replay import ReplayReader
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VERDICTS = ROOT / "verdicts.jsonl"
@@ -82,7 +84,7 @@ class Sentinel:
             profiles.setdefault(act.role, Profile.load(act.role)).learn(act)
         for profile in profiles.values():
             profile.save()
-            self.memory.remember(profile.describe(self.host))
+            self.memory.remember(profile.describe(self.host), node_set=["profile"])
         return list(profiles.values())
 
     def ask(self, question: str, watch: list[str], seconds: int) -> dict:
@@ -104,7 +106,7 @@ class Sentinel:
         existing = rules.load()
         rule = rules.Rule(tuple(patterns), reason or "set by a human", (f"manual-{secrets.token_hex(3)}",), action if action in ("read", "write", "exec") else "read")
         rules.save([*existing, rule])
-        self.memory.remember_later(_rule_prose(rule, self.host), f"rule-{rule.verdict}")
+        self.memory.remember_later(_rule_prose(rule, self.host), f"rule-{rule.verdict}", node_set=["review"])
         if self.enforce:
             self.push_deny()
         return rule
@@ -115,9 +117,9 @@ class Sentinel:
             raise KeyError(id)
         findings = record["findings"]
         chosen = [findings[i] for i in which if 0 <= i < len(findings)] if which else findings
-        rule = rules.compile(id, chosen, note, self.memory.recall(_precedent_query(chosen, note))) if correct else None
+        rule = rules.compile(id, chosen, note, self.memory.recall(_precedent_query(chosen, note), node_name=["review"])) if correct else None
         allowed = [] if correct else self._bless(chosen)
-        self.memory.remember_later(_review_prose(record, correct, note, allowed, rule, chosen), f"review-{id}")
+        self.memory.remember_later(_review_prose(record, correct, note, allowed, rule, chosen), f"review-{id}", node_set=["review"])
         if self.enforce:
             self.push_deny()
         return {"id": id, "correct": correct, "allowed": allowed, "rule": rule and vars(rule), "count": len(chosen)}
@@ -131,7 +133,7 @@ class Sentinel:
                 blessed.append(f.get("subject") or f["what"])
         for role, profile in touched.items():
             profile.save()
-            self.memory.remember_later(profile.describe(self.host), f"profile-{role}")
+            self.memory.remember_later(profile.describe(self.host), f"profile-{role}", node_set=["profile"])
         return sorted(set(blessed))
 
     def patrol(self, watch: list[str], every: int, stop: threading.Event) -> None:
@@ -144,7 +146,7 @@ class Sentinel:
                 findings = self.findings(acts)
                 if findings:
                     append(FINDINGS, {"at": stamp(), "findings": [vars(f) for f in findings]})
-                    self.memory.remember(_observation_prose(findings, self.host))
+                    self.memory.remember(_observation_prose(findings, self.host), node_set=["observation"])
                 print(f"[patrol] {len(acts)} workloads, {len(findings)} findings", flush=True)
             except Exception as exc:
                 print(f"[patrol] failed: {exc}", flush=True)
@@ -280,29 +282,43 @@ def main() -> int:
     ap.add_argument("--hostname", default=socket.gethostname())
     ap.add_argument("--seed", action="store_true", help="remember context/*.md on startup")
     ap.add_argument("--reset", action="store_true", help="with --seed, forget everything first")
+    ap.add_argument("--restore", action="store_true", help="restore the baseline memory instead of seeding (instant, identical)")
     ap.add_argument("--enforce", action="store_true", help="block denied opens in the kernel, not just flag them")
+    ap.add_argument("--replay", default=None, help="serve a recorded trace instead of the live yeet reader (no kernel needed)")
+    ap.add_argument("--speed", type=float, default=1.0, help="with --replay, how fast the trace plays")
+    ap.add_argument("--snapshot", default=None, help="write an HTML picture of cognee's memory graph to this path at startup")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9495)
     args = ap.parse_args()
 
+    baseline.configure()
+    if args.restore:
+        print("restored baseline memory" if baseline.restore() else "no baseline to restore; starting cold", flush=True)
     memory = Memory(args.dataset)
-    if args.seed:
+    if args.seed and not args.restore:
         print(f"seeded {', '.join(memory.seed(args.reset))}", flush=True)
-    sentinel = Sentinel(Reader(args.reader), memory, args.hostname, args.enforce, args.watch)
+    reader = ReplayReader(args.replay, args.speed) if args.replay else Reader(args.reader)
+    sentinel = Sentinel(reader, memory, args.hostname, args.enforce, args.watch)
     pushed = sentinel.push_deny()
-    print(
-        f"[enforce] {'blocking' if args.enforce else 'observing'}: "
-        f"{pushed['inodes']} inodes, {pushed['writes']} tamper, {pushed['execs']} exec, "
-        f"{pushed['basenames']} names, {pushed['dirs']} dirs for {args.watch or 'nothing'}",
-        flush=True,
-    )
+    if args.replay:
+        print(f"[replay] playing {pathlib.Path(args.replay).name} — no kernel, no fleet", flush=True)
+    else:
+        mode = "blocking denied opens" if args.enforce else "flagging only, not blocking"
+        armed = sum(pushed[key] for key in ("inodes", "writes", "execs", "basenames", "dirs"))
+        print(f"[guard] watching {', '.join(args.watch) or 'nothing'}; {mode}; {armed} paths armed", flush=True)
 
     stop = threading.Event()
     if args.every and args.watch:
         threading.Thread(target=sentinel.patrol, args=(args.watch, args.every, stop), name="patrol", daemon=True).start()
 
+    if args.snapshot:
+        def write_snapshot() -> None:
+            if sentinel.memory.snapshot(args.snapshot):
+                print(f"memory graph -> {args.snapshot}", flush=True)
+        threading.Thread(target=write_snapshot, name="snapshot", daemon=True).start()
+
     httpd = ThreadingHTTPServer((args.host, args.port), handler(sentinel))
-    print(f"sentinel on http://{args.host}:{args.port} (POST /ask /learn /review /observe, GET /rules; verdicts by {describe_llm()})", flush=True)
+    print(f"sentinel ready on http://{args.host}:{args.port} — verdicts by {describe_llm()}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

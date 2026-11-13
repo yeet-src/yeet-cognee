@@ -41,5 +41,6 @@ Records it keeps beside the package, all gitignored: `profiles/<role>.json`,
 - `deny.py` — rules + policy compiled into inode and basename deny sets for the LSM hook
 - `ask.py` — the prompt and the recall query
 - `memory.py` — the cognee owner
+- `baseline.py` — save/restore the seeded store + learned profiles, so a demo starts instantly and identically
 - `serve.py` — the service and the patrol
 - `__main__.py` — the `ask`, `learn`, `review`, `tail`, `rules`, `console` CLI
