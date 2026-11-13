@@ -130,7 +130,11 @@ the rule then cites both verdicts as its precedents. Rules are plain JSON in `me
 freely. Policy is never changed by a review: edit
 `memory/context/sandbox-policy.md` for that.
 
-## 5b. Play with it
+## 5b. Play with it — you are the agent
+
+This is the hands-on demo: you stand in for a watched agent. It's the opposite
+of section 6, where the sentinel watches your real agents — here you play one
+yourself so you can see a finding and a verdict happen live.
 
 ```bash
 ./play.sh      # two tmux panes: the sentinel console, and a bash it treats as agent-99

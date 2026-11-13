@@ -40,17 +40,24 @@ The first run builds a baseline (a minute or two). Later runs start instantly.
 
 ## Run it on your own system
 
-Watch the real processes on your host. Needs Linux and [`yeetd`][yeetd], the
-kernel watcher.
+Watch real processes from the kernel. Needs Linux and [`yeetd`][yeetd], the
+kernel watcher. Two ways in:
+
+**Play the agent yourself.** `./play.sh` opens the console next to a shell of
+your own, watched live as `agent-99`. Do agent-ish things in it — read a secret,
+dial an address, copy a binary — and watch the console flag each one and ask you
+to rule on it. It's the demo you drive by hand. (`./demo.sh --keep` runs the
+same stack against a built-in fleet instead of you.)
 
 ```bash
-./demo.sh --keep     # a built-in fleet, watched end to end
-./play.sh            # the console plus your own shell, watched as agent-99
+./play.sh            # you are agent-99; the console judges what you do
+./demo.sh --keep     # a scripted fleet, watched end to end
 ```
 
-`--watch` takes a **program-name prefix** — it watches every process whose name
-starts with it. The demo fleet is `agent-01…06`, watched with `agent-`. Point it
-at whatever your agents are called — say `claude` for Claude Code sessions:
+**Watch your actual agents.** `--watch` takes a **program-name prefix** — it
+watches every real process whose name starts with it. The demo fleet is
+`agent-01…06`, watched with `agent-`. Point it at whatever your agents are called
+— say `claude` for Claude Code sessions:
 
 ```bash
 yeet service apply -f yeet-service/service.toml        # start the activity log
