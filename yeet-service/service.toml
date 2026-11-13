@@ -3,17 +3,9 @@ restart = "always"
 enabled = true
 working-directory = "."
 
-# The reader: owns the `http` portal, assembles a host reading per request
-# from the system graph. By default each reading is stamped with the machine's
-# own name (the cognee side fills it in), which is all a single-box demo needs.
-# To stamp a specific name instead -- e.g. when the cognee side runs elsewhere,
-# so readings link to the right host -- add: args = ["--hostname", "my-box"]
 [units.serve]
 isolate = "./reading.js"
 
-# Bound to localhost: the reader exposes host internals, and in this demo the
-# cognee side runs on the same box. If the memory side runs elsewhere, change
-# this to 0.0.0.0 (and firewall it) so it can reach the reader.
 [units.web]
 web-server = "http://127.0.0.1:9490/"
 
@@ -28,3 +20,9 @@ target = "serve"
 portal = "http"
 tenancy = "shared"
 description = "Same as /: whole-box state + watched workloads in full + top background procs"
+
+[units.web.routes."/activity"]
+target = "serve"
+portal = "http"
+tenancy = "shared"
+description = "What watched workloads did: every exec, open and connect since ?since=<ms>, children included"

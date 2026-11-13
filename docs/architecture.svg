@@ -35,7 +35,7 @@
 
   <!-- edges first; arrowheads sit in the gap between line and node -->
   <g>
-    <!-- data flow: yeetd readings polled over the top into cognee's memory -->
+    <!-- data flow: yeetd readings and activity recorded into cognee's memory -->
     <path class="flow" d="M135,120 C135,74 625,74 625,120" marker-end="url(#arw)"/>
     <path class="edge" d="M380,72 V294" marker-end="url(#arw)"/>
     <path class="edge" d="M327,296 L181,186" marker-start="url(#arw)" marker-end="url(#arw)"/>
@@ -47,7 +47,7 @@
 
   <!-- you -->
   <rect class="pill" x="180" y="28" width="400" height="40" rx="20"/>
-  <text class="t-q" x="380" y="53">&#8220;Is this agent trying to escape its sandbox?&#8221;</text>
+  <text class="t-q" x="380" y="53">&#8220;Which of these agents is up to something?&#8221;</text>
 
   <!-- agent hub -->
   <rect class="node hub" x="300" y="300" width="160" height="72" rx="16"/>
@@ -57,7 +57,7 @@
   <!-- yeetd -->
   <rect class="node" x="60" y="120" width="150" height="62" rx="12"/>
   <text class="t-name" x="135" y="152">yeetd</text>
-  <text class="t-role" x="135" y="170">live state</text>
+  <text class="t-role" x="135" y="170">activity log</text>
 
   <!-- cognee -->
   <rect class="node" x="550" y="120" width="150" height="62" rx="12"/>
@@ -66,18 +66,18 @@
 
   <!-- coding agent (watched) -->
   <rect class="node watched" x="60" y="400" width="150" height="62" rx="12"/>
-  <text class="t-name" x="135" y="432">coding agent</text>
-  <text class="t-role" x="135" y="450">watched</text>
+  <text class="t-name" x="135" y="432">coding agents</text>
+  <text class="t-role" x="135" y="450">a fleet, watched</text>
 
   <!-- ollama -->
   <rect class="node" x="550" y="400" width="150" height="62" rx="12"/>
-  <text class="t-name" x="625" y="432">ollama</text>
-  <text class="t-role" x="625" y="450">local model</text>
+  <text class="t-name" x="625" y="432">LLM</text>
+  <text class="t-role" x="625" y="450">cognee's configured model</text>
 
   <!-- edge verbs (on top, with halos). two-way edges carry both directions. -->
   <g>
     <rect class="halo" x="306" y="77" width="148" height="16"/>
-    <text class="t-verb" x="380" y="89">polled &#8594; remembered</text>
+    <text class="t-verb" x="380" y="89">actions polled every window &#8594; findings remembered</text>
 
     <rect class="halo" x="356" y="172" width="48" height="16"/>
     <text class="t-verb" x="380" y="184">asks</text>
@@ -85,12 +85,12 @@
     <rect class="halo" x="206" y="223" width="96" height="16"/>
     <text class="t-verb" x="254" y="235">set watch</text>
     <rect class="halo" x="206" y="244" width="96" height="16"/>
-    <text class="t-verb" x="254" y="256">observations</text>
+    <text class="t-verb" x="254" y="256">actions</text>
 
     <rect class="halo" x="456" y="223" width="100" height="16"/>
-    <text class="t-verb" x="506" y="235">write memory</text>
+    <text class="t-verb" x="506" y="235">profile, findings, reviews</text>
     <rect class="halo" x="456" y="244" width="100" height="16"/>
-    <text class="t-verb" x="506" y="256">query history</text>
+    <text class="t-verb" x="506" y="256">recall profile, reviews</text>
 
     <rect class="halo" x="476" y="374" width="54" height="16"/>
     <text class="t-verb" x="503" y="386">reason</text>

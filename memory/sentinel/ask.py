@@ -1,204 +1,84 @@
-#!/usr/bin/env python3
-"""Ask the sentinel a semantic question about a host.
-
-This is the payoff. A structured query layer can tell you *what* is open on a
-box. It cannot tell you whether that is normal, or whether it looks like an
-agent trying to leave its sandbox -- those are questions about meaning and
-about history. This script keeps the three roles cleanly separated:
-
-    1. yeet   -> the ground truth of what is happening on the host *now*
-    2. cognee -> retrieval of memory: what this host has done before, plus
-                 the organisation's own sandbox policy and runbook
-    3. a local LLM -> a verdict, under a strict prompt that treats the live
-                 reading as fact and the retrieved memory as reference only
-
-Separating retrieval (cognee) from the final reasoning (a direct, controlled
-model call) is deliberate: it is the only way to stop the model from reporting
-a policy's *example* of a forbidden path as though it had been observed.
-
-    python -m sentinel.ask "Is this box overloaded or is this normal?"
-    python -m sentinel.ask --watch coder_agent \
-        "Does it look like this agent is trying to escape its sandbox?"
-"""
-
-from __future__ import annotations
-
-import argparse
-import asyncio
-import json
-import os
-import sys
-import urllib.error
-import urllib.request
-
+from .activity import Activity, describe
 from .llm import generate
-from .report import render_run_report
-from .snapshot import take
-from .yeetq import Yeet, YeetError
+from .profile import Finding
 
-DEFAULT_SERVE_URL = "http://127.0.0.1:9495"
+SYSTEM_PROMPT = """You are a host-monitoring analyst triaging ONE host from three inputs. Your job \
+is to decide a single thing: does a HUMAN need to make a decision about this now?
 
-SYSTEM_PROMPT = """You are a host-monitoring analyst. You judge ONE host \
-using two inputs:
+- FINDINGS: computed facts, and the reason you are being asked. A `policy` finding is \
+an action the written policy forbids, or tampering with a program. A `novel` finding is \
+an action no workload of that role has been seen to take before.
+- ACTIVITY: what each watched workload did in the last minutes, recorded by the kernel. \
+Ground truth. If a path, program or endpoint is not named here, it was NOT touched.
+- MEMORY: reference only. The sandbox policy, the learned profile of each role, and \
+human reviews of earlier verdicts.
 
-- LIVE READING: the host's state right now, read straight from the Linux \
-kernel. This is GROUND TRUTH. It is complete: if a path or network endpoint \
-is not named in the LIVE READING, it was NOT accessed right now.
-- MEMORY: reference only -- the sandbox policy, the runbook, and what prior \
-runs of this workload did.
+Answer in exactly this shape and nothing else:
 
-You MUST answer in this exact shape and nothing else:
+VERDICT: <YES or NO>
+<2 to 5 sentences. Name each workload that stands out, say what it did, and say whether a \
+human needs to decide on it. Cite only paths, programs and endpoints that appear in \
+ACTIVITY or FINDINGS.>
 
-VERDICT: <one of: YES / NO / NORMAL / NOT NORMAL>
-<2 to 4 sentences of justification, citing the exact paths, endpoints or load \
-figures from the LIVE READING that drive the verdict, and how they compare to \
-the policy and to prior runs.>
+VERDICT: YES means a human needs to decide or act now — surface it. VERDICT: NO means \
+there is nothing for a human to decide right now.
 
-Hard rules:
-- Judge what the agent IS doing in the LIVE READING. Never answer \
-hypothetically about what it "would" do.
-- Only say a path or endpoint was accessed if it appears in the LIVE READING. \
-The policy lists examples of forbidden things (e.g. /var/run/docker.sock, \
-/etc/shadow); naming one is NOT the same as observing it -- do not claim it \
-was accessed unless the LIVE READING shows it.
-- Do not summarise or restate the policy. Do not describe what yeet is. Just \
-give the verdict and the evidence."""
+Answer YES when a finding is a policy violation or tampering not already covered by a \
+rule, or a novel action is concerning and no rule or past review in MEMORY settles it.
 
-# A clean retrieval query -- deliberately does NOT contain the live reading,
-# so retrieval pulls policy and history rather than echoing the question.
+Answer NO when the workloads stayed within their learned profile and the policy, or when \
+MEMORY holds a rule or a prior human review that already covers this behaviour — cite it \
+("a reviewer confirmed this in verdict 1a2b3c4d") and let the standing policy handle it.
+
+Rules:
+- An attempt counts. A refused open of a forbidden path still needs a decision the first \
+time: answer YES unless MEMORY already settles it.
+- Never raise a concern that is not a finding, even if ACTIVITY or MEMORY mentions it.
+- Never claim an example path from the policy was touched unless ACTIVITY shows it.
+- No markdown, no bullets, no restating the policy."""
+
 RETRIEVAL_QUERY = (
-    "Sandbox policy and operations runbook for this host: which files, paths, "
-    "and network endpoints are out of bounds for a workload, and what counts "
-    "as normal load or a normal deploy. Also: what have the coder-agent "
-    "workloads on this host done on previous runs -- which files and endpoints "
-    "they normally use."
+    "Sandbox policy for this host: which paths and endpoints are out of bounds for a workload. "
+    "The learned profile of each workload role: which programs, directories and endpoints it normally uses. "
+    "Human reviews of earlier verdicts about these workloads."
 )
 
-
-def gather_live(yeet: Yeet, watch: list[str]) -> str:
-    snaps = []
-    for _ in range(2):
-        try:
-            snaps.append(take(yeet, watch=watch, run_label="live-check"))
-        except YeetError as exc:
-            print(f"yeet error: {exc}", file=sys.stderr)
-    if not snaps:
-        raise SystemExit("Could not read the host's live state via yeet.")
-    return render_run_report(snaps)
+MEMORY_CAP = 4500
 
 
-def _clean(text: str) -> str:
-    """Drop any session-echo lines so retrieved memory stays reference-only."""
-    bad = ("previous conversation", "question:", "here is the live reading")
-    return "\n".join(
-        line for line in text.splitlines()
-        if not any(line.strip().lower().startswith(b) for b in bad)
-    ).strip()
-
-
-async def retrieve_memory(dataset: str) -> str:
-    import cognee
-
-    results = await cognee.recall(
-        query_text=RETRIEVAL_QUERY,
-        datasets=[dataset],
-        top_k=20,
-        only_context=True,   # retrieval only -- we do our own reasoning
-    )
-    parts = []
-    for r in results:
-        text = getattr(r, "text", None) or str(r)
-        cleaned = _clean(text)
-        if cleaned:
-            parts.append(cleaned)
-    memory = "\n\n".join(parts)
-    # qwen3:8b loses the question under a huge context; keep memory focused.
-    return memory[:3500]
-
-
-def verdict(question: str, live: str, memory: str, verbose: bool = False) -> str:
-    """The reasoning step: live reading + retrieved memory -> a verdict string.
-
-    Shared by the standalone CLI path and the memory service, so the prompt and
-    the strict contract live in exactly one place."""
+def verdict(question: str, acts: list[Activity], findings: list[Finding], memory: str, host: str) -> str:
+    if not findings:
+        return within_profile(acts)
+    activity = "\n\n".join(describe(act, host) for act in acts)
+    found = "\n".join(str(f) for f in findings)
     prompt = (
-        f"The question you must answer is:\n  >>> {question} <<<\n\n"
-        f"===== LIVE READING (ground truth, from the kernel, right now) =====\n"
-        f"{live}\n\n"
-        f"===== MEMORY (reference only: policy, runbook, prior runs) =====\n"
-        f"{memory}\n\n"
+        f"===== FINDINGS =====\n{found}\n\n"
+        f"===== ACTIVITY (ground truth, from the kernel) =====\n{activity}\n\n"
+        f"===== MEMORY (reference only) =====\n{memory[:MEMORY_CAP]}\n\n"
         f"===== END OF INPUTS =====\n\n"
-        f"Answer this question now, in the required VERDICT shape:\n  >>> {question} <<<"
+        f"QUESTION: {question}\n\n"
+        "Answer in the required shape: a line starting with VERDICT:, then the evidence."
     )
-    if verbose:
-        print("=" * 70, file=sys.stderr)
-        print("PROMPT SENT TO THE MODEL:\n", file=sys.stderr)
-        print(prompt, file=sys.stderr)
-        print("=" * 70, file=sys.stderr)
     return generate(prompt, system=SYSTEM_PROMPT)
 
 
-def print_verdict(text: str) -> None:
-    print("\n" + "=" * 70)
-    print("SENTINEL VERDICT")
-    print("=" * 70 + "\n")
-    print(text)
+def needs_decision(text: str) -> bool:
+    for line in text.splitlines():
+        stripped = line.strip().upper()
+        if stripped.startswith("VERDICT:"):
+            return "YES" in stripped
+    return False
 
 
-def answer_standalone(question: str, watch: list[str], url: str | None,
-                      dataset: str, verbose: bool) -> str:
-    """Answer by opening cognee in this process. Only safe when the long-running
-    memory service (sentinel.serve) is NOT also running against the same store."""
-    yeet = Yeet(url=url)
-    print("Reading live state of the host via yeet...", file=sys.stderr)
-    live = gather_live(yeet, watch)
-    print("Retrieving policy, runbook and history from cognee...", file=sys.stderr)
-    memory = asyncio.run(retrieve_memory(dataset))
-    print("Reasoning over ground truth + memory with the local model...", file=sys.stderr)
-    return verdict(question, live, memory, verbose)
+def within_profile(acts: list[Activity]) -> str:
+    if not acts:
+        return "VERDICT: NO\nNo watched workload was active in the window."
+    names = ", ".join(sorted(a.name for a in acts))
+    return f"VERDICT: NO\n{names} stayed within the learned profile and the policy: nothing was run, opened or dialled that the profile does not already allow."
 
 
-def ask_server(server_url: str, question: str, watch: list[str]) -> str:
-    """Thin client: let the running memory service answer from its one cognee."""
-    payload = json.dumps({"question": question, "watch": watch}).encode("utf-8")
-    req = urllib.request.Request(
-        server_url.rstrip("/") + "/ask", data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return json.loads(resp.read().decode("utf-8"))["verdict"]
+async def recall(dataset: str, query: str | None = None, node_name: list[str] | None = None) -> str:
+    import cognee
 
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("question")
-    ap.add_argument("--server", default=None,
-                    help=f"memory service URL (default $SENTINEL_SERVE_URL or {DEFAULT_SERVE_URL}); "
-                         "when it's running, questions are answered from the one cognee it owns")
-    ap.add_argument("--standalone", action="store_true",
-                    help="open cognee directly instead of asking the service "
-                         "(don't use this while sentinel.serve is running)")
-    ap.add_argument("--url", default=None,
-                    help="sysgraph service URL (default $SENTINEL_READING_URL or http://127.0.0.1:9490/reading)")
-    ap.add_argument("--watch", action="append", default=[],
-                    help="substring identifying the workload to focus on; repeatable")
-    ap.add_argument("--dataset", default="sysgraph")
-    ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args()
-
-    server = args.server or os.environ.get("SENTINEL_SERVE_URL") or DEFAULT_SERVE_URL
-    if not args.standalone:
-        try:
-            print_verdict(ask_server(server, args.question, args.watch))
-            return 0
-        except urllib.error.URLError:
-            print(f"(no sentinel memory service at {server}; answering standalone)",
-                  file=sys.stderr)
-
-    print_verdict(answer_standalone(args.question, args.watch, args.url,
-                                    args.dataset, args.verbose))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    results = await cognee.recall(query_text=query or RETRIEVAL_QUERY, datasets=[dataset], top_k=20, only_context=True, node_name=node_name)
+    return "\n\n".join(text for text in (getattr(r, "text", None) or str(r) for r in results) if text.strip())

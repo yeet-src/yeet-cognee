@@ -1,101 +1,93 @@
-# yeet + cognee — semantic host monitoring
+# yeet + cognee — a sentinel for agent fleets
 
-Answer judgement questions about a host that a metrics query can't — **"is this
-agent trying to escape its sandbox?"**, **"is this box overloaded or is this
-normal?"** — by combining:
+Ten coding agents run on a box. Which one is up to something? A metrics query
+can't tell you. This can: it watches each agent from the kernel, learns what a
+well-behaved one looks like, and flags the ones that step out of line.
 
-- **yeet** — live ground truth, read straight from the kernel (processes, open
-  fds, sockets, GPU, memory), served as an HTTP API.
-- **cognee** — memory of what the host has done before, plus the org's sandbox
-  policy and runbook.
-- **an LLM** — the verdict, grounded in the reading and the retrieved memory.
+## Components
+
+- **yeet** — what each agent *does*, from the kernel: every program it runs, file
+  it touches, and connection it makes, child processes included.
+- **cognee** — memory: the policy, each agent's learned normal, and your past
+  rulings.
+- **an LLM** — the verdict, from the activity and that memory.
 
 ![architecture](docs/architecture.svg)
 
-*(open `docs/architecture.html` for the interactive version)*
+## Quickstart — sample data, no kernel
 
-## Run it
-
-Both halves run on the host you want to watch. Needs yeet + `yeetd`, cognee,
-and an LLM/embeddings backend (this demo uses local Ollama: `qwen3:8b` +
-`nomic-embed-text`).
-
-There are two long-running services: the **yeet reader** (ground truth) and the
-**memory service** (owns cognee — it records on a timer and answers questions).
-Everything else is a short command against them.
+Plays a recorded agent fleet through the real sentinel. No daemon, no root, no
+fleet — just Python and a model.
 
 ```bash
 git clone https://github.com/yeet-src/yeet-cognee && cd yeet-cognee
-
-# 1. yeet reader — serves a live host reading
-cd yeet-service
-yeet service apply -f service.toml                    # start it
-curl -s http://127.0.0.1:9490/ | head                # verify it's working
-
-# 2. cognee side — set up the environment
-cd ../memory
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env                                  # point cognee at your LLM
-
-# 3. memory service — owns cognee: seeds the policy + runbook, records what it
-#    sees on a timer, and answers questions. Leave it running.
-python -m sentinel.serve --seed --reset --watch coder_agent.py
-
-# 4. in another shell: an agent workload starts poking around the host
-. .venv/bin/activate
-python scenario/coder_agent.py --mode unusual &
-
-# 5. ask
-python -m sentinel.ask --watch coder_agent.py \
-  "Does it look like this agent is trying to escape its sandbox?"
-python -m sentinel.ask \
-  "Is this box overloaded, or is this normal right now?"
+./replay.sh
 ```
 
-Why a memory **service**: cognee's embedded store is single-writer, so one
-process must own it — it both grows memory and answers questions (which also
-makes `ask` fast). It mirrors the yeet side: reader is a service, memory is a
-service too. `scenario/run_scenario.sh baseline benign-001` records a labelled
-normal run for comparison. Without the service running, the commands still work
-standalone.
+At the console:
 
-## What you get
+- You see what each agent did, in plain language.
+- A finding pops: `⚠ DECISION NEEDED  agent-03 opened /var/run/docker.sock`.
+- You rule on it: `bad <#> the docker socket is off limits`.
+- `agent-06` tries the same thing → `✓ no action needed`, covered by your rule.
 
-`ask` prints a verdict grounded in the live reading and the recalled policy and
-history. Real output from the run above, with the unusual workload live:
+You need:
 
-```
-$ python -m sentinel.ask --watch coder_agent.py \
-    "Does it look like this agent is trying to escape its sandbox?"
+- Python 3.10–3.14.
+- A model — default is a local Ollama (`qwen3:8b`); for a hosted one, set `LLM_*` in `memory/.env`.
 
-======================================================================
-SENTINEL VERDICT
-======================================================================
+The first run builds a baseline (a minute or two). Later runs start instantly.
 
-VERDICT: YES
-The process `python` opened the host-revealing paths `/etc/passwd` and
-`/proc/1/status`, which are explicitly listed as out of bounds in the sandbox
-policy. These actions indicate reconnaissance and are not part of normal
-behavior for a coding-agent workload on this host.
+## Run it on your own system
+
+Watch the real processes on your host. Needs Linux and [`yeetd`][yeetd], the
+kernel watcher.
+
+```bash
+./demo.sh --keep     # a built-in fleet, watched end to end
+./play.sh            # the console plus your own shell, watched as agent-99
 ```
 
-The same machinery, no new code, for the load question on an idle box:
+`--watch` takes a **program-name prefix** — it watches every process whose name
+starts with it. The demo fleet is `agent-01…06`, watched with `agent-`. Point it
+at whatever your agents are called — say `claude` for Claude Code sessions:
 
+```bash
+yeet service apply -f yeet-service/service.toml        # start the activity log
+cd memory && python -m sentinel.serve --seed --watch claude --every 60 &
+python -m sentinel learn  --watch claude --seconds 600   # learn normal from a window you trust
+python -m sentinel ask    --watch claude "which agents stand out, and why?"
+python -m sentinel review <id> --correct --note "out of bounds"
 ```
-$ python -m sentinel.ask "Is this box overloaded, or is this normal right now?"
 
-VERDICT: NORMAL
-The host has a one-minute load average of 0.35 and is using 6.0 GB of memory,
-which is within normal operational ranges. No watched workload was observed, and
-there are no indications of unusual file or network activity that would suggest
-overload or out-of-bounds behavior.
-```
+It picks up agents that are **already running** — no restart needed; the watcher
+reads them from the kernel the moment it starts. It only sees activity from that
+point on, though: history isn't retroactive.
 
-The verdict cites the exact paths, endpoints, or load figures from the live
-reading — the `VERDICT: <YES/NO/NORMAL/NOT NORMAL>` line is a fixed contract, so
-an agent calling `/ask` can branch on it.
+`--enforce` blocks forbidden opens instead of just flagging them.
 
----
+[yeetd]: https://yeet.cx
 
-`yeet-service/` and `memory/` each have their own README with the details.
+## How it works
+
+- **Watch** — yeet reports every program, file, and connection, straight from
+  the kernel. Even millisecond-long and child processes count.
+- **Learn** — from a stretch you trust, it builds each agent's normal: the
+  programs, directories, and endpoints it uses.
+- **Find** — it compares live activity to the policy and that normal. A *policy*
+  finding breaks a rule; a *novel* finding is something the agent has never done.
+- **Judge** — the model reads the findings and the memory and answers one thing:
+  does a human need to decide? It checks every interval, so nothing slips by.
+- **Learn from you** — like case law. Call a finding bad and it becomes a rule
+  that catches the same thing next time; call it fine and it joins the normal.
+- **Enforce** — with `--enforce` it doesn't just flag, it blocks the open in the
+  kernel, and symlinks or renamed paths can't sneak around it.
+
+## Layout
+
+- `yeet-service/` — the watcher (kernel + HTTP)
+- `memory/sentinel/` — the sentinel: judging, learning, enforcing
+- `memory/scenario/` — the demo fleet and the recorded `trace.json`
+- `memory/context/` — the policy and runbook that seed memory
+- `replay.sh` / `demo.sh` / `play.sh` — sample-data / live / by-hand
+- `docs/cookbook.md` — the full walkthrough; `skill/sentinel/` — a Claude Code skill

@@ -1,125 +1,79 @@
-#!/usr/bin/env python3
-"""Test fixtures for the sentinel demo: two coding-agent workloads.
-
-These are harmless demo processes. They exist only to leave different,
-observable traces in the yeet system graph so the sentinel has something
-real to compare:
-
-    baseline   -- works inside its own workspace, opens one network socket
-                  to a normal API endpoint, then idles.
-    unusual    -- does the same, and additionally holds read-only file
-                  descriptors on a few host paths (by default /etc/passwd and
-                  /proc/1/status), and opens a socket to a different endpoint.
-
-Neither fixture writes, deletes, or changes anything on the host. The
-"unusual" one only *opens* descriptors (O_RDONLY) and then sits still, so
-the daemon's kernel view (open fds + sockets) is the only thing that
-distinguishes it.
-
-    python coder_agent.py --mode baseline
-    python coder_agent.py --mode unusual                      # default recon paths
-    python coder_agent.py --mode unusual --touch /etc/shadow  # pick your own
-"""
-
-from __future__ import annotations
-
 import argparse
 import os
 import pathlib
+import shutil
 import socket
-import sys
+import subprocess
 import time
 
-WORKSPACE = pathlib.Path.home() / "agent-workspace"
-
-# A normal API endpoint a coding agent would legitimately reach.
-BASELINE_ENDPOINT = ("api.github.com", 443)
-# A different endpoint, to show a changed network fingerprint.
-UNUSUAL_ENDPOINT = ("1.1.1.1", 443)
-# Host-revealing paths an agent probing its sandbox would read. Used in unusual
-# mode when no --touch is given, so the demo works with no extra flags.
-DEFAULT_UNUSUAL_PATHS = ["/etc/passwd", "/proc/1/status"]
+WORKSPACES = pathlib.Path.home() / "agent-workspace"
+APPROVED_ENDPOINT = ("api.github.com", 443)
+UNAPPROVED_ENDPOINT = ("1.1.1.1", 443)
+FORBIDDEN_PATHS = ("/var/run/docker.sock", "/etc/shadow")
 
 
-def setup_workspace() -> list[int]:
-    """Create a small workspace and open a couple of files inside it.
-
-    Returns the open fds so they stay open for the lifetime of the process
-    (and therefore stay visible in the sysgraph).
-    """
-    WORKSPACE.mkdir(exist_ok=True)
-    held: list[int] = []
+def work(workspace: pathlib.Path, cycle: int) -> None:
     for name in ("main.py", "notes.md", "data.json"):
-        path = WORKSPACE / name
-        if not path.exists():
-            path.write_text(f"# {name} -- sentinel demo fixture\n")
-        held.append(os.open(path, os.O_RDONLY))
-    return held
+        with open(workspace / name, "a") as fh:
+            fh.write(f"# cycle {cycle}\n")
+        with open(workspace / name) as fh:
+            fh.read()
+    (workspace / "scratch.txt").write_text(f"cycle {cycle}\n")
+    subprocess.run([shutil.which("git") or "/usr/bin/git", "--version"], capture_output=True)
+    dial(APPROVED_ENDPOINT)
 
 
-def open_socket(endpoint: tuple[str, int]) -> socket.socket | None:
-    """Open a TCP connection and keep it open. Best-effort: if the host has
-    no network path to the endpoint, the fixture still runs."""
+def dial(endpoint: tuple[str, int]) -> None:
     try:
-        sock = socket.create_connection(endpoint, timeout=5)
-        print(f"  connected to {endpoint[0]}:{endpoint[1]}")
-        return sock
-    except OSError as exc:
-        print(f"  could not reach {endpoint[0]}:{endpoint[1]} ({exc}); continuing")
-        return None
+        socket.create_connection(endpoint, timeout=3).close()
+    except OSError:
+        pass
 
 
-def touch_readonly(paths: list[str]) -> list[int]:
-    """Open each path read-only and hold the descriptor. No writes, no reads
-    of content are required -- holding the fd is what the sysgraph records."""
-    held: list[int] = []
-    for p in paths:
+def break_policy() -> None:
+    for path in FORBIDDEN_PATHS:
         try:
-            fd = os.open(p, os.O_RDONLY)
-            held.append(fd)
-            print(f"  opened (read-only) {p}")
-        except OSError as exc:
-            print(f"  could not open {p} ({exc}); skipping")
-    return held
+            os.close(os.open(path, os.O_RDONLY))
+        except OSError:
+            pass
+    dial(UNAPPROVED_ENDPOINT)
+
+
+def peek_at_processes(limit: int = 24) -> None:
+    others = (p for p in os.listdir("/proc") if p.isdigit() and int(p) not in (1, os.getpid()))
+    for pid in list(others)[:limit]:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                fh.read()
+        except OSError:
+            pass
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", choices=("baseline", "unusual"), default="baseline")
-    ap.add_argument("--hold", type=float, default=300.0,
-                    help="seconds to stay alive so it can be observed and asked about")
-    ap.add_argument("--touch", action="append", default=[],
-                    help="(unusual mode) host path to open read-only; repeatable "
-                         f"(default: {' '.join(DEFAULT_UNUSUAL_PATHS)})")
+    ap = argparse.ArgumentParser(description="A harmless process that leaves the traces of a coding agent.")
+    ap.add_argument("--name", default="agent")
+    ap.add_argument("--mode", choices=("baseline", "policy", "suspicious"), default="baseline")
+    ap.add_argument("--hold", type=float, default=300.0, help="seconds to stay alive")
+    ap.add_argument("--cycle", type=float, default=15.0, help="seconds between work cycles")
     args = ap.parse_args()
 
-    print(f"coder-agent fixture starting in `{args.mode}` mode, pid {os.getpid()}")
-    held_fds = setup_workspace()
-    held_socks = []
+    workspace = WORKSPACES / args.name
+    workspace.mkdir(parents=True, exist_ok=True)
+    os.chdir(workspace)
+    print(f"{args.name}: {args.mode}, pid {os.getpid()}, workspace {workspace}", flush=True)
 
-    if args.mode == "baseline":
-        s = open_socket(BASELINE_ENDPOINT)
-        if s:
-            held_socks.append(s)
-    else:
-        s = open_socket(UNUSUAL_ENDPOINT)
-        if s:
-            held_socks.append(s)
-        held_fds += touch_readonly(args.touch or DEFAULT_UNUSUAL_PATHS)
-
-    print(f"holding for {args.hold:.0f}s so the sentinel collector can observe...")
-    try:
-        time.sleep(args.hold)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        for fd in held_fds:
-            os.close(fd)
-        for s in held_socks:
-            s.close()
-    print("coder-agent fixture exiting")
+    deadline = time.monotonic() + args.hold
+    for cycle in range(1, 1_000_000):
+        if time.monotonic() >= deadline:
+            break
+        work(workspace, cycle)
+        if args.mode == "policy":
+            break_policy()
+        elif args.mode == "suspicious":
+            peek_at_processes()
+        time.sleep(max(0.0, min(args.cycle, deadline - time.monotonic())))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
