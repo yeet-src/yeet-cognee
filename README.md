@@ -89,15 +89,24 @@ you can edit. The written policy only changes when a person edits it.
 ## Try it by hand
 
 ```bash
-./play.sh                              # brings the stack up and follows agent-99
-memory/scenario/agent_shell.sh         # in another terminal: a bash the sentinel treats as agent-99
+./play.sh
 ```
 
-Whatever you run in that shell is attributed to `agent-99`, which shares the
-`agent` profile. The first terminal prints what it did, every finding, and
-the model's verdict when findings appear. Review a verdict with
-`python -m sentinel review <id> --correct|--wrong`, then try the same kind
-of thing again and watch the rule or the profile catch it.
+It brings the stack up and opens two tmux panes: the sentinel console on
+the left, and on the right a bash the sentinel treats as `agent-99`, sharing
+the `agent` profile. Whatever you run on the right shows up on the left as
+what it did, each finding, and a verdict. Rule on it at the prompt:
+
+```
+sentinel> bad credentials must never leak
+rule: */.aws/credentials, */.env*, *.pem, */.ssh/*  (credentials must never leak; from 7a38dcb7)
+sentinel> good that endpoint is ours
+allowed for agent-99: the profile now includes it
+```
+
+Then try the same kind of thing again and watch the rule or the profile
+catch it. Without tmux, run `python -m sentinel console --watch agent-99`
+and `memory/scenario/agent_shell.sh` in two terminals yourself.
 
 ## What you get
 

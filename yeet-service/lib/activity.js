@@ -19,7 +19,7 @@ const NOISE_PREFIXES = [
   "/etc/crypto-policies/", "/var/lib/ca-certificates/", "/proc/stat", "/proc/meminfo",
   "/proc/loadavg", "/proc/uptime", "/proc/diskstats", "/proc/vmstat",
 ];
-const NOISE_PARTS = ["/site-packages/", "/__pycache__/", "/dist-packages/", "/node_modules/", "/lib/python", "/lib64/python"];
+const NOISE_PARTS = ["/site-packages/", "/__pycache__/", "/dist-packages/", "/node_modules/", "/lib/python", "/lib64/python", "/.pyenv/", "/pyenv.d/"];
 
 const isNoise = (path) =>
   NOISE_PREFIXES.some((p) => path.startsWith(p)) ||

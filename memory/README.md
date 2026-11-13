@@ -11,7 +11,7 @@ python -m sentinel.serve --seed --reset --watch agent- --every 60
 python -m sentinel learn --watch agent- --seconds 60
 python -m sentinel ask --watch agent- "Which agents stand out?"
 python -m sentinel review <id> --wrong --note "that endpoint is ours"
-python -m sentinel tail --watch agent-99 --judge   # live log of a workload
+python -m sentinel console --watch agent-99        # live log plus bad/good/ask at a prompt
 ```
 
 ## The service
@@ -40,4 +40,4 @@ Records it keeps beside the package, all gitignored: `profiles/<role>.json`,
 - `ask.py` — the prompt and the recall query
 - `memory.py` — the cognee owner
 - `serve.py` — the service and the patrol
-- `__main__.py` — the `ask`, `learn`, `review`, `tail`, `rules` CLI
+- `__main__.py` — the `ask`, `learn`, `review`, `tail`, `rules`, `console` CLI

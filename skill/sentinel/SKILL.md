@@ -64,8 +64,9 @@ edits `memory/context/sandbox-policy.md`.
 
 ## Let the user try it by hand
 
-`./play.sh` brings the stack up and follows `agent-99`; tell the user to run
-`memory/scenario/agent_shell.sh` in another terminal and act there.
+`./play.sh` brings the stack up and opens tmux with the sentinel console on
+the left and a bash treated as `agent-99` on the right. In the console the
+user types `bad <why>` or `good <why>` to rule on the last verdict.
 
 ## Learn a profile
 

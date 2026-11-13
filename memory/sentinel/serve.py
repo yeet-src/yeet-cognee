@@ -54,9 +54,10 @@ class Sentinel:
         learned = rules.load()
         return [f for act in acts for f in Profile.load(act.role).findings(act) + _ruled(act, learned)]
 
-    def observe_briefly(self, watch: list[str], seconds: int) -> dict:
-        acts = [summarize(g) for g in self.observe(watch, seconds)]
-        return {"workloads": {a.name: brief(a) for a in acts}, "findings": [vars(f) for f in self.findings(acts)]}
+    def observe_since(self, watch: list[str], since_ms: int) -> dict:
+        payload = self.reader.activity(watch, since_ms)
+        acts = [summarize(g) for g in payload["processes"]]
+        return {"until": payload["until"], "workloads": {a.name: brief(a) for a in acts}, "findings": [vars(f) for f in self.findings(acts)]}
 
     def learn(self, watch: list[str], seconds: int) -> list[Profile]:
         profiles: dict[str, Profile] = {}
@@ -101,9 +102,12 @@ class Sentinel:
         return acts
 
     def patrol(self, watch: list[str], every: int, stop: threading.Event) -> None:
+        since = now_ms()
         while not stop.is_set():
             try:
-                acts = [summarize(g) for g in self.observe(watch, every)]
+                payload = self.reader.activity(watch, since)
+                since = _epoch_ms(payload["until"]) + 1
+                acts = [summarize(g) for g in payload["processes"]]
                 findings = self.findings(acts)
                 if findings:
                     append(FINDINGS, {"at": stamp(), "findings": [vars(f) for f in findings]})
@@ -112,6 +116,10 @@ class Sentinel:
             except Exception as exc:
                 print(f"[patrol] failed: {exc}", flush=True)
             stop.wait(every)
+
+
+def _epoch_ms(iso: str) -> int:
+    return int(dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000)
 
 
 def _ruled(act: Activity, learned: list[rules.Rule]) -> list[Finding]:
@@ -184,7 +192,7 @@ def handler(sentinel: Sentinel):
                     profiles = sentinel.learn(body.get("watch") or [], int(body.get("seconds") or DEFAULT_WINDOW_S))
                     return self._send(200, {"profiles": {p.role: sorted(p.workloads) for p in profiles}})
                 if route == "/observe":
-                    return self._send(200, sentinel.observe_briefly(body.get("watch") or [], int(body.get("seconds") or 5)))
+                    return self._send(200, sentinel.observe_since(body.get("watch") or [], int(body.get("since") or now_ms() - 5000)))
                 if route == "/review":
                     return self._send(202, sentinel.review(body["id"], bool(body["correct"]), body.get("note") or ""))
                 self._send(404, {"error": f"no such route: {self.path}"})

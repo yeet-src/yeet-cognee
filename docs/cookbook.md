@@ -103,13 +103,14 @@ freely. Policy is never changed by a review: edit
 ## 5b. Play with it
 
 ```bash
-./play.sh                          # one terminal: the stack, then a live log of agent-99
-memory/scenario/agent_shell.sh     # another terminal: a bash the sentinel treats as agent-99
+./play.sh      # two tmux panes: the sentinel console, and a bash it treats as agent-99
 ```
 
-Try reading a secret file, dialling an address, copying a binary. The log
-shows what the shell did, each finding in red (policy) or yellow (novel),
-and the verdict. Review it, then do the same kind of thing again.
+Try reading a secret file, dialling an address, copying a binary in the
+right pane. The left pane shows what the shell did, each finding in red
+(policy) or yellow (novel), and the verdict. Type `bad <why>` or
+`good <why>` there to rule on it, `ask <question>` to ask, `rules` to list
+the rules. Then do the same kind of thing again.
 
 ## 6. Point it at your own workloads
 
