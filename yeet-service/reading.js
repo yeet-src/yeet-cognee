@@ -1,55 +1,52 @@
-/* The HTTP face of the sysgraph reader: one portal, one job.
- *
- *   GET /                         a complete host reading, JSON
- *   GET /reading?watch=coder.py   the same, with that workload pulled in full
- *   GET /reading?watch=a,b&top=8  several workloads, more background processes
- *
- * A reading is kernel ground truth assembled into one JSON object: whole-box
- * state (load, memory, GPU), each watched process in full (fds, io, sockets
- * attributed by inode), and the largest other processes. No interpretation --
- * the cognee side turns this into prose and judges it.
- *
- * The hostname is passed in from service.toml (`--hostname <name>`) so every
- * reading is stamped with the box's own name, which is what lets cognee link
- * observations of the same host across time.
- */
-
+import { activity, start as startActivityLog } from "./lib/activity.js";
 import { reading } from "./lib/assemble.js";
 
-const args = yeet.args ?? {};
-const HOSTNAME = args.hostname ?? null;
+const HOSTNAME = yeet.args?.hostname ?? null;
+const SELF = ["sentinel", "fleet.py", "demo.sh"];
+const ROUTES = "routes: / /reading (?watch=a,b ?self=a,b ?top=N) /activity (?watch=a,b ?self=a,b ?since=ms ?until=ms ?limit=N)";
 
 function parse(url) {
-  const [path, qs = ""] = String(url ?? "/").split("?", 2);
-  const params = new Map();
-  for (const pair of qs.split("&")) {
-    if (!pair) continue;
-    const [k, v = ""] = pair.split("=", 2);
-    params.set(decodeURIComponent(k), decodeURIComponent(v.replace(/\+/g, " ")));
-  }
+  const [path, query = ""] = String(url ?? "/").split("?", 2);
+  const params = new Map(
+    query.split("&").filter(Boolean).map((pair) => {
+      const [k, v = ""] = pair.split("=", 2);
+      return [decodeURIComponent(k), decodeURIComponent(v.replace(/\+/g, " "))];
+    }),
+  );
   return { path: path.replace(/\/+$/, "") || "/", params };
 }
 
-function list(value) {
-  return value ? value.split(",").map((s) => s.trim()).filter(Boolean) : [];
-}
+const list = (value) => (value ? value.split(",").map((s) => s.trim()).filter(Boolean) : []);
+
+const integer = (params, name, fallback) => {
+  const value = params.has(name) ? Number(params.get(name)) : fallback;
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
+  return value;
+};
 
 async function respond(peer, url) {
   const { path, params } = parse(url);
-  if (path !== "/" && path !== "/reading") {
-    return peer.write(`no such route: ${path}\nroutes: / /reading (?watch=substr,substr ?self=substr ?top=N)\n`);
+  if (path === "/activity") {
+    return peer.write(JSON.stringify(await activity({
+      watch: list(params.get("watch")),
+      self: [...SELF, ...list(params.get("self"))],
+      since: integer(params, "since", Date.now() - 60_000),
+      until: params.has("until") ? integer(params, "until") : Infinity,
+      limit: integer(params, "limit", 2000),
+    })));
   }
-  const opts = {
-    watch: list(params.get("watch")),
-    self: list(params.get("self")),
-    hostname: params.get("hostname") ?? HOSTNAME,
-    topOther: params.has("top") ? Number(params.get("top")) : 5,
-  };
-  if (!Number.isInteger(opts.topOther) || opts.topOther < 0) {
-    throw new Error("top must be a non-negative integer");
+  if (path === "/" || path === "/reading") {
+    return peer.write(JSON.stringify(await reading({
+      watch: list(params.get("watch")),
+      self: [...SELF, ...list(params.get("self"))],
+      hostname: params.get("hostname") ?? HOSTNAME,
+      topOther: integer(params, "top", 5),
+    })));
   }
-  peer.write(JSON.stringify(await reading(opts)));
+  peer.write(`no such route: ${path}\n${ROUTES}\n`);
 }
+
+await startActivityLog();
 
 const portal = new Portal("http");
 portal.on("peer", async (peer, request) => {
@@ -62,4 +59,4 @@ portal.on("peer", async (peer, request) => {
   }
 });
 
-console.log(`sysgraph: serving / and /reading on portal http (hostname: ${HOSTNAME ?? "unset"})`);
+console.log(`sysgraph: serving /, /reading and /activity on portal http (hostname: ${HOSTNAME ?? "unset"})`);

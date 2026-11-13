@@ -1,198 +1,231 @@
-#!/usr/bin/env python3
-"""sentinel.serve -- the memory service. One process owns cognee.
-
-cognee's embedded stores are single-writer: two processes that both open them
-(a long-running collector loop AND a separate `ask`) contend for one lock. The
-fix is to let ONE process own cognee. This service does that -- it:
-
-  1. runs the collector loop internally: polls the yeet reader on a timer and
-     remembers a fresh run report, so memory grows on its own;
-  2. records on demand (`POST /remember`), so a scenario can populate memory
-     without opening a second cognee client;
-  3. answers questions over HTTP (`POST /ask`), reasoning from that same cognee.
-
-So it mirrors the yeet side: the reader is a service with routes, and memory is
-a service too. `sentinel.ask` becomes a thin client that posts the question
-here, which also makes answers fast -- no cognee cold start per question.
-
-    # seed the brain, then loop + serve
-    python -m sentinel.serve --seed --reset --watch coder_agent.py --every 5m
-
-    # ask it (from anywhere on the box)
-    curl -s localhost:9495/ask -d '{"question":"is this agent escaping?","watch":["coder_agent.py"]}'
-    python -m sentinel.ask --watch coder_agent.py "is this agent escaping?"
-"""
-
-from __future__ import annotations
-
 import argparse
-import asyncio
 import datetime as dt
 import json
-import sys
+import pathlib
+import secrets
+import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import ask as askmod
-from .collector import collect, parse_duration
-from .report import render_run_report
-from .yeetq import Yeet
+from . import rules
+from .activity import Activity, brief, summarize
+from .ask import verdict
+from .llm import describe as describe_llm
+from .memory import Memory
+from .profile import Finding, Profile
+from .reader import Reader
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+VERDICTS = ROOT / "verdicts.jsonl"
+FINDINGS = ROOT / "findings.jsonl"
+DEFAULT_WINDOW_S = 90
 
 
-class Cognee:
-    """Single owner of cognee. All cognee work runs on one persistent event
-    loop in one thread, serialized by a lock -- so the store has exactly one
-    client and coroutines never land on a different loop than they started on."""
-
-    def __init__(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        self._lock = threading.Lock()
-        t = threading.Thread(target=self._run, name="cognee", daemon=True)
-        t.start()
-
-    def _run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_forever()
-
-    def call(self, coro_factory):
-        """Run an async cognee op to completion, one at a time."""
-        with self._lock:
-            fut = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
-            return fut.result()
-
-    def remember(self, text: str, dataset: str) -> None:
-        import cognee
-        self.call(lambda: cognee.remember(text, dataset_name=dataset))
-
-    def recall(self, dataset: str) -> str:
-        return self.call(lambda: askmod.retrieve_memory(dataset))
-
-    def seed(self, reset: bool, dataset: str) -> None:
-        from .seed import seed
-        self.call(lambda: seed(reset, dataset))
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
 
-def collector_loop(cog: Cognee, args: argparse.Namespace, stop: threading.Event) -> None:
-    """Poll the reader and remember, forever, until asked to stop."""
-    every = parse_duration(args.every)
-    cycle = 0
-    yeet = Yeet(url=args.url)
-    print(f"[loop] a run of {args.samples} readings every {args.every}", flush=True)
-    while not stop.is_set():
-        cycle += 1
-        label = f"{args.label}-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}"
-        try:
-            snaps = collect(yeet, args.watch, label, args.samples, args.interval, args.hostname)
-            if snaps:
-                cog.remember(render_run_report(snaps), args.dataset)
-                print(f"[loop] cycle {cycle}: remembered {label}", flush=True)
-            else:
-                print(f"[loop] cycle {cycle}: no readings; will retry", file=sys.stderr, flush=True)
-        except Exception as exc:  # a bad cycle must not kill the loop
-            print(f"[loop] cycle {cycle} failed: {exc}", file=sys.stderr, flush=True)
-        stop.wait(every)
+def stamp() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def make_handler(cog: Cognee, args: argparse.Namespace):
+def append(path: pathlib.Path, record: dict) -> None:
+    with path.open("a") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def find(path: pathlib.Path, id: str) -> dict | None:
+    if not path.exists():
+        return None
+    return next((r for r in map(json.loads, path.read_text().splitlines()) if r.get("id") == id), None)
+
+
+class Sentinel:
+    def __init__(self, reader: Reader, memory: Memory, host: str):
+        self.reader = reader
+        self.memory = memory
+        self.host = host
+
+    def observe(self, watch: list[str], seconds: int) -> list[dict]:
+        return self.reader.activity(watch, now_ms() - seconds * 1000)["processes"]
+
+    def findings(self, acts: list[Activity]) -> list[Finding]:
+        learned = rules.load()
+        return [f for act in acts for f in Profile.load(act.role).findings(act) + _ruled(act, learned)]
+
+    def observe_briefly(self, watch: list[str], seconds: int) -> dict:
+        acts = [summarize(g) for g in self.observe(watch, seconds)]
+        return {"workloads": {a.name: brief(a) for a in acts}, "findings": [vars(f) for f in self.findings(acts)]}
+
+    def learn(self, watch: list[str], seconds: int) -> list[Profile]:
+        profiles: dict[str, Profile] = {}
+        for act in map(summarize, self.observe(watch, seconds)):
+            profiles.setdefault(act.role, Profile.load(act.role)).learn(act)
+        for profile in profiles.values():
+            profile.save()
+            self.memory.remember(profile.describe(self.host))
+        return list(profiles.values())
+
+    def ask(self, question: str, watch: list[str], seconds: int) -> dict:
+        groups = self.observe(watch, seconds)
+        acts = [summarize(g) for g in groups]
+        findings = self.findings(acts)
+        text = verdict(question, acts, findings, self.memory.recall(), self.host)
+        record = {
+            "id": secrets.token_hex(4), "asked_at": stamp(), "question": question, "watch": watch,
+            "verdict": text, "findings": [vars(f) for f in findings],
+        }
+        append(VERDICTS, {**record, "groups": groups})
+        return record
+
+    def review(self, id: str, correct: bool, note: str) -> dict:
+        record = find(VERDICTS, id)
+        if not record:
+            raise KeyError(id)
+        allowed = [] if correct else self._allow(record)
+        rule = rules.compile(id, record["findings"], note, self.memory.recall(_precedent_query(record, note))) if correct else None
+        self.memory.remember_later(_review_prose(record, correct, note, allowed, rule), f"review-{id}")
+        return {"id": id, "correct": correct, "allowed": sorted(a.name for a in allowed), "rule": rule and vars(rule)}
+
+    def _allow(self, record: dict) -> list[Activity]:
+        novel = {f["workload"] for f in record["findings"] if f["kind"] == "novel"}
+        acts = [act for act in map(summarize, record["groups"]) if act.name in novel]
+        for role in {a.role for a in acts}:
+            profile = Profile.load(role)
+            for act in acts:
+                if act.role == role:
+                    profile.allow(act)
+            profile.save()
+            self.memory.remember_later(profile.describe(self.host), f"profile-{role}")
+        return acts
+
+    def patrol(self, watch: list[str], every: int, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                acts = [summarize(g) for g in self.observe(watch, every)]
+                findings = self.findings(acts)
+                if findings:
+                    append(FINDINGS, {"at": stamp(), "findings": [vars(f) for f in findings]})
+                    self.memory.remember(_observation_prose(findings, self.host))
+                print(f"[patrol] {len(acts)} workloads, {len(findings)} findings", flush=True)
+            except Exception as exc:
+                print(f"[patrol] failed: {exc}", flush=True)
+            stop.wait(every)
+
+
+def _ruled(act: Activity, learned: list[rules.Rule]) -> list[Finding]:
+    return [
+        Finding("policy", act.name, f"opened `{path}`, which matches the learned rule `{', '.join(rule.patterns)}` ({rule.reason})")
+        for path in sorted(act.opened)
+        for rule in learned
+        if rule.matches(path)
+    ]
+
+
+def _review_prose(record: dict, correct: bool, note: str, allowed: list[Activity], rule: rules.Rule | None) -> str:
+    outcome = "CONFIRMED" if correct else "REJECTED"
+    names = ", ".join(sorted(a.name for a in allowed)) or "these workloads"
+    tail = (
+        "Treat this behaviour as a real incident when it appears again."
+        + (f" It is now a rule: files matching {', '.join(rule.patterns)} are out of bounds because {rule.reason}"
+           f" (precedents: {', '.join(rule.precedents)})." if rule else "")
+        if correct else
+        f"The behaviour of {names} has been added to their profile as allowed."
+    )
+    return (
+        f"# Human review of sentinel verdict {record['id']}\n\n"
+        f"On {record['asked_at']} the sentinel was asked about {record['watch'] or 'the whole host'}: "
+        f"\"{record['question']}\". It answered: {record['verdict']}\n\n"
+        f"A human reviewer {outcome} this verdict" + (f", saying: {note}." if note else ".") + f" {tail}"
+    )
+
+
+def _precedent_query(record: dict, note: str) -> str:
+    return "Human reviews of earlier sentinel verdicts about behaviour like this: " + note + " " + " ".join(f["what"] for f in record["findings"])
+
+
+def _observation_prose(findings: list[Finding], host: str) -> str:
+    lines = "\n".join(f"- {f}" for f in findings)
+    return f"# Findings on host {host} at {stamp()}\n\nThese were observed and have not been reviewed:\n\n{lines}"
+
+
+def handler(sentinel: Sentinel):
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):  # keep the console for the loop, not access logs
+        def log_message(self, *_):
             pass
 
         def _send(self, code: int, payload: dict) -> None:
-            body = json.dumps(payload).encode("utf-8")
+            body = json.dumps(payload).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        def _body(self) -> dict:
+            length = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(length)) if length else {}
+
         def do_GET(self):
             if self.path.rstrip("/") == "/healthz":
                 return self._send(200, {"ok": True})
+            if self.path.rstrip("/") == "/rules":
+                return self._send(200, {"rules": [vars(r) for r in rules.load()]})
             self._send(404, {"error": f"no such route: {self.path}"})
-
-        def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
 
         def do_POST(self):
             route = self.path.rstrip("/")
+            body = self._body()
             try:
                 if route == "/ask":
-                    return self._ask(self._body())
-                if route == "/remember":
-                    return self._remember(self._body())
+                    return self._send(200, sentinel.ask(body["question"], body.get("watch") or [], int(body.get("window") or DEFAULT_WINDOW_S)))
+                if route == "/learn":
+                    profiles = sentinel.learn(body.get("watch") or [], int(body.get("seconds") or DEFAULT_WINDOW_S))
+                    return self._send(200, {"profiles": {p.role: sorted(p.workloads) for p in profiles}})
+                if route == "/observe":
+                    return self._send(200, sentinel.observe_briefly(body.get("watch") or [], int(body.get("seconds") or 5)))
+                if route == "/review":
+                    return self._send(202, sentinel.review(body["id"], bool(body["correct"]), body.get("note") or ""))
                 self._send(404, {"error": f"no such route: {self.path}"})
+            except KeyError as exc:
+                self._send(400, {"error": f"missing or unknown {exc}"})
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
-
-        def _ask(self, body: dict):
-            question = (body.get("question") or "").strip()
-            if not question:
-                return self._send(400, {"error": "missing 'question'"})
-            watch = body.get("watch") or []
-            # live reading + verdict are stateless (HTTP to reader / ollama);
-            # only the recall touches cognee, through the single owner.
-            live = askmod.gather_live(Yeet(url=args.url), watch)
-            memory = cog.recall(args.dataset)
-            self._send(200, {"verdict": askmod.verdict(question, live, memory)})
-
-        def _remember(self, body: dict):
-            # Record one run now, through the owned cognee -- so a scenario can
-            # populate memory without opening a second cognee client.
-            watch = body.get("watch") or args.watch
-            samples = int(body.get("samples") or args.samples)
-            interval = float(body.get("interval") or args.interval)
-            label = f"{body.get('label') or args.label}-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}"
-            snaps = collect(Yeet(url=args.url), watch, label, samples, interval, args.hostname)
-            if not snaps:
-                return self._send(200, {"remembered": None, "readings": 0})
-            cog.remember(render_run_report(snaps), args.dataset)
-            self._send(200, {"remembered": label, "readings": len(snaps)})
 
     return Handler
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--watch", action="append", default=[],
-                    help="substring matched against a process's exe and cmdline; repeatable")
-    ap.add_argument("--label", default="watch", help="base run label (a timestamp is appended)")
-    ap.add_argument("--samples", type=int, default=4, help="readings per run (default 4)")
-    ap.add_argument("--interval", type=float, default=8.0, help="seconds between readings")
-    ap.add_argument("--every", default="5m", help="time between runs: 30s, 5m, 1h, or seconds")
-    ap.add_argument("--dataset", default="sysgraph", help="cognee dataset name")
-    ap.add_argument("--url", default=None,
-                    help="sysgraph reader URL (default $SENTINEL_READING_URL or http://127.0.0.1:9490/reading)")
-    ap.add_argument("--hostname", default=None, help="override the recorded host name")
-    ap.add_argument("--seed", action="store_true", help="ingest context/*.md (policy + runbook) on startup")
-    ap.add_argument("--reset", action="store_true", help="with --seed, wipe all memory first")
-    ap.add_argument("--no-loop", action="store_true", help="serve /ask only; do not record on a timer")
-    ap.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
-    ap.add_argument("--port", type=int, default=9495, help="bind port (default 9495)")
+    ap = argparse.ArgumentParser(description="The sentinel memory service: owns cognee, judges, learns, patrols.")
+    ap.add_argument("--watch", action="append", default=[], help="prefix of a token of a process's exe, name or argv; repeatable")
+    ap.add_argument("--every", type=int, default=60, help="seconds between patrol windows (0 disables the patrol)")
+    ap.add_argument("--dataset", default="sysgraph")
+    ap.add_argument("--reader", default=None, help="yeet reader URL (default $SENTINEL_READER_URL or http://127.0.0.1:9490)")
+    ap.add_argument("--hostname", default=socket.gethostname())
+    ap.add_argument("--seed", action="store_true", help="remember context/*.md on startup")
+    ap.add_argument("--reset", action="store_true", help="with --seed, forget everything first")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=9495)
     args = ap.parse_args()
 
-    cog = Cognee()
-
+    memory = Memory(args.dataset)
     if args.seed:
-        print("Seeding policy + runbook into cognee...", flush=True)
-        cog.seed(args.reset, args.dataset)
+        print(f"seeded {', '.join(memory.seed(args.reset))}", flush=True)
+    sentinel = Sentinel(Reader(args.reader), memory, args.hostname)
 
     stop = threading.Event()
-    if not args.no_loop:
-        threading.Thread(target=collector_loop, args=(cog, args, stop),
-                         name="collector", daemon=True).start()
+    if args.every and args.watch:
+        threading.Thread(target=sentinel.patrol, args=(args.watch, args.every, stop), name="patrol", daemon=True).start()
 
-    httpd = ThreadingHTTPServer((args.host, args.port), make_handler(cog, args))
-    print(f"sentinel memory service on http://{args.host}:{args.port}  "
-          f"(POST /ask, GET /healthz)", flush=True)
+    httpd = ThreadingHTTPServer((args.host, args.port), handler(sentinel))
+    print(f"sentinel on http://{args.host}:{args.port} (POST /ask /learn /review /observe, GET /rules; verdicts by {describe_llm()})", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down...", flush=True)
+        pass
     finally:
         stop.set()
-        httpd.shutdown()
     return 0
 
 

@@ -1,83 +1,88 @@
 ---
 name: sentinel
-description: Ask semantic questions about a host's live state and behaviour — "is this agent trying to escape its sandbox?", "is this box overloaded or is this normal?". Combines yeet (live kernel ground truth) with cognee (memory of past behaviour + the org's policy/runbook). Use when the user asks a judgement question about a host that a structured metrics query can't answer.
+description: Ask judgement questions about the agents running on a host — "which of these agents is up to something?", "is this a policy violation or just odd?". Combines yeet (what each process does, from BPF tracepoints) with cognee (the sandbox policy, the learned profile of a well-behaved agent, and human reviews). Use when the user asks whether an agent or workload on a host is behaving, or asks to run the yeet + cognee demo.
 ---
 
-# Sentinel: semantic host monitoring over yeet + cognee
+# Sentinel: judging agent fleets with yeet + cognee
 
-The sentinel answers questions about a host that need *meaning* and *history*,
-not just a metrics lookup. It pairs two data sources:
+The sentinel answers questions about a host's workloads that need meaning
+and history, not a metrics lookup. Three parts:
 
-- **yeet** — the live system graph, read straight from the Linux kernel. This
-  is ground truth about what a host is doing *right now*: processes, open file
-  descriptors, open sockets, mount namespaces, GPU and memory. A process
-  cannot hide its open fds or sockets from the kernel, so this is unspoofable.
-- **cognee** — memory. It holds (a) prose records of what this host and its
-  workloads have done on previous runs, and (b) the organisation's own
-  sandbox policy and operations runbook. This is what lets the sentinel say
-  "that's never happened before" or "that's normal during a deploy".
+- **yeet** records every program a watched process runs, every file it opens
+  or tries to, and every connection it makes, children included, from BPF
+  tracepoints. An attempt is recorded whether or not the kernel allowed it.
+- **cognee** remembers the sandbox policy, a **profile** per role of workload
+  (programs by hash, directories, endpoints) learned from a period known to
+  be well behaved, and human reviews of earlier verdicts.
+- The **LLM cognee is configured with** writes the verdict from computed
+  **findings**: `policy` (breaks a written rule or tampers with a program)
+  and `novel` (outside the profile).
 
-The yeet side runs as a **service** exposing an HTTP reading endpoint (see
-`yeet-service/`); the cognee side (`memory/`) consumes it. Both run on the
-host being watched, with an LLM + embeddings backend cognee is pointed at
-(this demo uses a local Ollama).
+Everything runs on the host being watched. Layout: `yeet-service/` (the
+reader), `memory/` (the sentinel, Python), `demo.sh`.
 
-> **Adapt before use:** set the commands below to how your deployment is
-> reached — run them on the host directly, or wrap them in `ssh <host> '...'`.
-> The reading endpoint defaults to `http://127.0.0.1:9490/reading`
-> (`$SENTINEL_READING_URL`).
-
-## When to use this
-
-Use the sentinel when the user asks a *judgement* question about a host, e.g.:
-
-- "Does it look like this agent is trying to escape its sandbox?"
-- "Is this box overloaded, or is this normal?"
-- "Is anything unusual running on this host right now?"
-
-Do **not** use it for a plain metrics lookup ("what's the load average?") —
-for that, query the reading endpoint (or yeet) directly.
-
-## How to answer a question
-
-Run the `ask` module from the `memory/` directory. It fetches a live reading
-from the yeet service, folds it into prose, recalls the relevant policy,
-runbook, and history from cognee, then has the local LLM render a verdict
-grounded in both.
+## Run the demo
 
 ```bash
-cd memory && python -m sentinel.ask \
-  --watch coder_agent.py \
-  "Does it look like this agent is trying to escape its sandbox?"
+./demo.sh --keep
 ```
 
-- `--watch <substring>` focuses the reading on a particular workload (matched
-  against each process's executable and command line). Repeatable. Omit it to
-  read the whole host.
-- `--url <reading-url>` points at a reader on another host/port.
-- Add `--verbose` to also print the live reading that was sent to the model.
+It applies the reader, sets up the venv, starts the sentinel (seeding the
+policy takes a minute or two on a local model), learns from a clean fleet,
+starts a fleet where `agent-04` breaks policy and the last agent is odd,
+prints one verdict and confirms it. `--keep` leaves it running. It checks for
+yeet 0.25+ with `yeetd`, python3, and the LLM in `memory/.env`; if it reports
+no Ollama, tell the user to start one or set `LLM_*` to another provider.
 
-The command prints a `SENTINEL VERDICT` section. Relay that verdict to the
-user, and when it cites specific facts (a path, an endpoint, a load figure),
-keep those in your summary — they are the evidence.
+## Answer a question
 
-## Seeding and recording (setup, run rarely)
+With the sentinel running (the demo leaves it on `127.0.0.1:9495`):
 
-These are only needed when standing the demo up or adding new history.
+```bash
+cd memory && .venv/bin/python -m sentinel ask --watch agent-05 \
+  "Is this agent doing anything the others are not?"
+```
 
-- Seed the company brain (policy + runbook) once:
-  `python -m sentinel.seed --reset`
-- Record a workload's behaviour into memory (one prose run report per run):
-  `python -m sentinel.collector --watch coder_agent.py --label <name>`
-- Run a demo workload and record it in one step:
-  `bash scenario/run_scenario.sh baseline benign-003`
-  `bash scenario/run_scenario.sh unusual rogue-002 /etc/passwd /proc/1/status`
+- `--watch <prefix>` picks workloads by a token of their exe, name or argv;
+  `agent-` is the whole fleet. Repeatable.
+- `--window <seconds>` is how much activity to judge (default 90).
+
+It prints the verdict and an id. Relay the verdict and the facts it cites.
+Say whether each finding is a **policy violation** or **suspicious**.
+
+## Record a review
+
+```bash
+.venv/bin/python -m sentinel review <id> --correct --note "<why>"
+.venv/bin/python -m sentinel review <id> --wrong   --note "<why>"
+```
+
+A rejection widens the role's profile. A confirmation is remembered as an
+incident and compiled into file patterns (`python -m sentinel rules`) that
+catch the same kind of thing next time. Policy only changes when a person
+edits `memory/context/sandbox-policy.md`.
+
+## Let the user try it by hand
+
+`./play.sh` brings the stack up and follows `agent-99`; tell the user to run
+`memory/scenario/agent_shell.sh` in another terminal and act there.
+
+## Learn a profile
+
+When the user says a period was clean:
+
+```bash
+.venv/bin/python -m sentinel learn --watch <prefix> --seconds 600
+```
+
+## Rarely
+
+- Run only the fleet: `.venv/bin/python scenario/fleet.py --agents 5 --hold 300` (`--clean` for all well behaved).
+- Rebuild the BPF object after editing `yeet-service/bpf/activity.bpf.c`: `make -C yeet-service`.
 
 ## The point
 
-A structured query ("SELECT ... FROM sockets") can tell you an fd on
-`/etc/passwd` is open. It cannot tell you whether that is normal for this
-agent, or that it matches the policy's definition of reconnaissance, or that
-it never happened in forty prior runs. That judgement — ground truth from
-yeet, meaning and history from cognee, verdict from the model — is what the
-sentinel adds.
+A metrics query can say an fd on `/etc/passwd` is open. It cannot see the
+read that was over in a millisecond, say whether it is normal for this role
+of agent, or match it to the policy. Ground truth from yeet, a learned
+profile and the policy from cognee, the verdict from the model.

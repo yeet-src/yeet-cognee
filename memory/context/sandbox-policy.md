@@ -44,10 +44,11 @@ Any one of them is worth a human's attention on this host:
 
 ## How to judge
 
-Ground truth about what a process is actually doing comes from the yeet
-system graph, which reads the kernel directly: open file descriptors, open
-sockets, and the mount namespace are all kernel state the process cannot
-hide. The question of whether a given behaviour is *normal for this agent*
-is answered by comparing against what the same agent did on previous runs.
-A path or an endpoint that appears for the first time, and that falls in the
-out-of-bounds list above, is the thing to escalate.
+Ground truth about what a process does comes from yeet, which records every
+program a process runs, every file it opens or attempts to open, and every
+connection it makes, straight from the kernel. Whether a behaviour is
+*normal for this kind of agent* is answered by the learned profile of that
+role: what the same kind of agent ran, wrote, read and dialled while it was
+known to be well behaved. A path or an endpoint outside the profile is
+suspicious; one in the out-of-bounds list above is a violation, whether or
+not the kernel allowed it.
