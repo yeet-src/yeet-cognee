@@ -33,4 +33,8 @@ class Memory:
         threading.Thread(target=self.remember, args=(text,), name=name, daemon=True).start()
 
     def recall(self, query: str | None = None) -> str:
-        return self._call(lambda: recall(self.dataset, query))
+        try:
+            return self._call(lambda: recall(self.dataset, query))
+        except Exception as exc:  # an empty or not-yet-seeded store should not fail a verdict
+            print(f"[memory] recall unavailable: {exc}", flush=True)
+            return ""

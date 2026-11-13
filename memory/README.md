@@ -25,6 +25,7 @@ single-writer). It seeds `context/*.md` with `--seed`, patrols every
 - `POST /review {"id", "correct": true|false, "note"}` → `202`; a rejection widens the profile, a confirmation compiles a rule
 - `POST /observe {"watch": [...], "seconds": 5}` → what each workload did and the findings, no model
 - `GET /rules` → the rules learned from confirmed reviews
+- `GET /deny` → the compiled deny list and the patterns that can't be enforced
 
 Records it keeps beside the package, all gitignored: `profiles/<role>.json`,
 `rules.json`, `verdicts.jsonl`, `findings.jsonl`.
@@ -37,6 +38,7 @@ Records it keeps beside the package, all gitignored: `profiles/<role>.json`,
 - `binaries.py` — sha256 and owning package of a program
 - `profile.py` — `Profile`: learn, findings, allow, describe
 - `rules.py` — rules compiled from confirmed reviews: load, match, compile
+- `deny.py` — rules + policy compiled into inode and basename deny sets for the LSM hook
 - `ask.py` — the prompt and the recall query
 - `memory.py` — the cognee owner
 - `serve.py` — the service and the patrol

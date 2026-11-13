@@ -25,6 +25,7 @@ class Activity:
     program_writes: Counter = field(default_factory=Counter)
     peeks: int = 0
     connects: Counter = field(default_factory=Counter)
+    blocked: set = field(default_factory=set)
 
     @property
     def role(self) -> str:
@@ -88,6 +89,8 @@ def _fold(act: Activity, event: dict) -> None:
 
 def _fold_open(act: Activity, event: dict) -> None:
     path = event["path"]
+    if event.get("blocked"):
+        act.blocked.add(path)
     writing = event["access"] != "read" or event.get("create")
     if is_sensitive(path):
         act.sensitive[path] += 1
@@ -144,6 +147,7 @@ def brief(act: Activity) -> str:
         f"wrote to programs {listed(act.program_writes, 3)}" if act.program_writes else "",
         f"peeked at /proc {act.peeks} times" if act.peeks else "",
         f"dialled {listed(act.endpoints, 3)}" if act.connects else "",
+        f"was BLOCKED opening {listed(act.blocked, 3)}" if act.blocked else "",
     ]
     return "; ".join(p for p in parts if p)
 

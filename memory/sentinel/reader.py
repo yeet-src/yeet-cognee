@@ -22,6 +22,17 @@ class Reader:
             params["until"] = str(until_ms)
         return self._get(f"{self.url}/activity?{urllib.parse.urlencode(params)}")
 
+    def enforce(self, on: bool, watch: list[str], sets) -> dict:
+        def slim(inodes):
+            return [{"dev": i["dev"], "ino": i["ino"]} for i in inodes]
+        spec = json.dumps({
+            "on": on, "watch": watch,
+            "inodes": slim(sets.read_inodes), "writes": slim(sets.write_inodes), "execs": slim(sets.exec_inodes),
+            "basenames": sets.basenames, "dirs": sets.dirs,
+            "protectExec": sets.protect_exec, "protectPtrace": sets.protect_ptrace,
+        })
+        return self._get(f"{self.url}/enforce?{urllib.parse.urlencode({'spec': spec})}")
+
     def _get(self, url: str) -> dict:
         try:
             with urllib.request.urlopen(url, timeout=self.timeout) as response:

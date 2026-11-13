@@ -112,6 +112,13 @@ right pane. The left pane shows what the shell did, each finding in red
 `good <why>` there to rule on it, `ask <question>` to ask, `rules` to list
 the rules. Then do the same kind of thing again.
 
+Run `./play.sh --enforce` instead and the denied opens actually fail: a BPF
+LSM `file_open` hook denies them with `EPERM`. It matches the resolved file,
+by inode for concrete files and by basename for patterns, so a symlink, a
+relative path, a hard link or a forked child can't get around it. Only
+watched processes are blocked. `python -m sentinel rules` and `GET /deny`
+show what is enforced.
+
 ## 6. Point it at your own workloads
 
 - Pass your agents' process name or a `--name` prefix as `--watch`. A

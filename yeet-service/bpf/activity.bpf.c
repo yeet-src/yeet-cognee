@@ -4,6 +4,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#include "enforce.h"
+
 char LICENSE[] SEC("license") = "GPL";
 
 #define COMM_LEN 16
@@ -102,6 +104,12 @@ static __always_inline void identify(__u64 *ts, __u32 *pid, __u32 *uid, __u8 com
   bpf_get_current_comm(comm, COMM_LEN);
 }
 
+SEC("tracepoint/sched/sched_process_fork")
+int on_fork(struct trace_event_raw_sched_process_fork *ctx) {
+  watch_child(ctx->parent_pid, ctx->child_pid);
+  return 0;
+}
+
 SEC("tracepoint/sched/sched_process_exec")
 int on_exec(struct trace_event_raw_sched_process_exec *ctx) {
   struct exec_event *event = bpf_ringbuf_reserve(&execs, sizeof(*event), 0);
@@ -115,6 +123,7 @@ int on_exec(struct trace_event_raw_sched_process_exec *ctx) {
   struct inode *exe = BPF_CORE_READ(mm, exe_file, f_inode);
   identify(&event->ts, &event->pid, &event->uid, event->comm);
   event->ppid = BPF_CORE_READ(task, real_parent, tgid);
+  watch_child(event->ppid, event->pid);
   event->ino = BPF_CORE_READ(exe, i_ino);
   event->dev = BPF_CORE_READ(exe, i_sb, s_dev);
 
@@ -214,5 +223,49 @@ int on_sock_state(struct trace_event_raw_inet_sock_set_state *ctx) {
   }
 
   bpf_ringbuf_submit(event, 0);
+  return 0;
+}
+
+/* The enforcement point: the kernel has resolved the path, followed any
+ * symlink and applied the mount namespace, so file->f_inode and the resolved
+ * dentry chain are the real target. Deny reading a protected file (by inode,
+ * by its own name, or by an ancestor directory name) and deny writing to a
+ * tamper-protected file. Returning -EPERM fails the open. */
+SEC("lsm/file_open")
+int BPF_PROG(deny_file_open, struct file *file) {
+  if (!guarding()) {
+    return 0;
+  }
+  if (inode_denied(file) || name_denied(file) || dir_denied(file) || write_denied(file)) {
+    bump_denied();
+    return -EPERM;
+  }
+  return 0;
+}
+
+SEC("lsm/bprm_check_security")
+int BPF_PROG(deny_binprm, struct linux_binprm *bprm) {
+  if (!guarding()) {
+    return 0;
+  }
+  if (exec_denied(BPF_CORE_READ(bprm, file))) {
+    bump_denied();
+    return -EPERM;
+  }
+  return 0;
+}
+
+/* A watched process may not read another process's memory (ptrace,
+ * process_vm_readv): that is how creds are lifted out of a deputy that is
+ * allowed to hold them. Reaching into another watched workload is fine. */
+SEC("lsm/ptrace_access_check")
+int BPF_PROG(deny_ptrace, struct task_struct *child, unsigned int mode) {
+  if (!guarding() || !flag_set(PROTECT_PTRACE)) {
+    return 0;
+  }
+  if (!is_watched(BPF_CORE_READ(child, tgid))) {
+    bump_denied();
+    return -EPERM;
+  }
   return 0;
 }

@@ -108,6 +108,42 @@ Then try the same kind of thing again and watch the rule or the profile
 catch it. Without tmux, run `python -m sentinel console --watch agent-99`
 and `memory/scenario/agent_shell.sh` in two terminals yourself.
 
+## Blocking, not just flagging
+
+Everything above observes. Add `--enforce` and the sentinel also blocks, through
+a BPF **LSM `file_open` hook**: when a watched process opens a forbidden file,
+the hook denies it and the open fails with `EPERM`. Because the hook runs after
+the kernel has resolved the path, it matches the real target, not the string
+the caller typed:
+
+```bash
+./play.sh --enforce                               # the playground, blocking for real
+python -m sentinel.serve --watch agent- --enforce # or the service
+```
+
+Two deny sets are compiled from the policy and the learned rules:
+
+- **By inode.** Every concrete sensitive file (the Docker socket, `/etc/shadow`,
+  `~/.aws/credentials`, a rule's exact path) is resolved to its device and inode
+  now. Matching the inode blocks reading it through a **symlink, a hard link, a
+  relative path, or a bind mount** — they all resolve to the same inode.
+- **By basename.** A pattern with no directory (`.env`, `*.pem`, `id_rsa`) is
+  matched against the opened file's final name, so it is caught wherever the file
+  lives and however it is reached.
+
+Only watched processes are ever blocked, and a watched process's children are
+covered the instant they fork or exec, so a forked helper or a spawned `cat`
+cannot slip past. A pattern that needs a directory anywhere in the path
+(`*/.ssh/*`) can't be reduced to an inode or a name; it stays finding-only and
+the service says which on startup. `GET /deny` shows both sets and what could
+not be enforced.
+
+Verified leak checks on this host: reading a denied file by absolute path,
+relative path (after `cd`), symlink, and from a forked child are all blocked;
+an allowed file in the same directory and the same read from an unwatched
+process are not. The remaining gap is a process reading a file it opened
+*before* it became watched; the open itself is the checkpoint.
+
 ## What you get
 
 Real output from `./demo.sh` with `qwen3:8b`:
@@ -143,7 +179,8 @@ the background. A hosted model does all of it in seconds. Ollama's default
 ## Layout
 
 - `yeet-service/` — the reader: `reading.js`, `lib/activity.js`, `bpf/activity.bpf.c`
-- `memory/sentinel/` — the sentinel: `serve.py` (service), `profile.py`, `rules.py`, `activity.py`, `ask.py`
+- `memory/sentinel/` — the sentinel: `serve.py` (service), `profile.py`, `rules.py`, `deny.py` (enforcement), `activity.py`, `ask.py`
+- `yeet-service/bpf/enforce.h` — the LSM `file_open` deny hook (inode + basename)
 - `memory/scenario/` — `fleet.py` and `coder_agent.py`, the fixtures
 - `memory/context/` — the sandbox policy and runbook that seed memory
 - `demo.sh`, `play.sh`, `stack.sh` — the demo, the playground, and what they share

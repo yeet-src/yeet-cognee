@@ -5,6 +5,7 @@
 #
 #   ./play.sh                 # needs tmux for the two panes; otherwise prints what to run
 #   ./play.sh --skip-setup    # venv, cognee and seed already done
+#   ./play.sh --enforce       # actually block denied opens, don't just flag them
 #   ./play.sh --keep          # leave the stack running after you quit
 #
 # In the agent shell, try: cat .aws/credentials; curl https://1.1.1.1;

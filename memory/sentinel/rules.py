@@ -19,10 +19,12 @@ concern as an existing rule, extend that rule: return its verdict id in "extends
 patterns to add. If it is a new concern, "extends" is null.
 
 Answer with JSON only, in this shape and nothing else:
-{"extends": null, "patterns": ["*/.aws/credentials", "*/.env*", "*.pem"], "reason": "credential files must not be read"}
+{"extends": null, "action": "read", "patterns": ["*/.aws/credentials", "*/.env*", "*.pem"], "reason": "credential files must not be read"}
 
 Patterns are shell globs matched against the full path and against the file name. Three to \
-eight patterns. The reason is one short sentence in the reviewer's words."""
+eight patterns. The reason is one short sentence in the reviewer's words. "action" is "read" \
+when the agent must not read the files, "write" when it must not overwrite them (tampering \
+with a trusted program), or "exec" when it must not run them; default "read"."""
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,7 @@ class Rule:
     patterns: tuple[str, ...]
     reason: str
     precedents: tuple[str, ...]
+    action: str = "read"
 
     @property
     def verdict(self) -> str:
@@ -40,16 +43,17 @@ class Rule:
         return any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(name, p) for p in self.patterns)
 
     def extended(self, patterns: tuple[str, ...], verdict: str) -> "Rule":
-        return Rule(tuple(dict.fromkeys(self.patterns + patterns)), self.reason, self.precedents + (verdict,))
+        return Rule(tuple(dict.fromkeys(self.patterns + patterns)), self.reason, self.precedents + (verdict,), self.action)
 
     def __str__(self) -> str:
-        return f"{', '.join(self.patterns)}  ({self.reason}; from {', '.join(self.precedents)})"
+        verb = {"write": "no write", "exec": "no exec"}.get(self.action, "no read")
+        return f"{', '.join(self.patterns)}  ({verb}: {self.reason}; from {', '.join(self.precedents)})"
 
 
 def load() -> list[Rule]:
     if not RULES.exists():
         return []
-    return [Rule(tuple(r["patterns"]), r["reason"], tuple(r["precedents"])) for r in json.loads(RULES.read_text())]
+    return [Rule(tuple(r["patterns"]), r["reason"], tuple(r["precedents"]), r.get("action", "read")) for r in json.loads(RULES.read_text())]
 
 
 def save(rules: list[Rule]) -> None:
@@ -71,12 +75,13 @@ def compile(verdict_id: str, findings: list[dict], note: str, reviews: str) -> R
         patterns = tuple(str(p) for p in answer["patterns"] if str(p).strip() and ":" not in str(p))
         reason = str(answer["reason"]).strip()
         extends = answer.get("extends")
+        action = answer.get("action") if answer.get("action") in ("read", "write", "exec") else "read"
     except (ValueError, KeyError, TypeError):
-        patterns, reason, extends = tuple(_quoted(p) for p in paths), note or "confirmed by a reviewer", None
+        patterns, reason, extends, action = tuple(_quoted(p) for p in paths), note or "confirmed by a reviewer", None, "read"
     if not patterns:
         return None
     parent = next((r for r in existing if extends in r.precedents), None)
-    rule = parent.extended(patterns, verdict_id) if parent else Rule(patterns, reason, (verdict_id,))
+    rule = parent.extended(patterns, verdict_id) if parent else Rule(patterns, reason, (verdict_id,), action)
     save([*(r for r in existing if r is not parent), rule])
     return rule
 

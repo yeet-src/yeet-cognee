@@ -11,7 +11,7 @@ bpf/include/vmlinux.h:
 	@mkdir -p bpf/include
 	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $@
 
-activity.bpf.o: bpf/activity.bpf.c bpf/include/vmlinux.h
+activity.bpf.o: bpf/activity.bpf.c bpf/enforce.h bpf/include/vmlinux.h
 	$(CLANG) -O2 -g -Wall -target bpf -D__TARGET_ARCH_$(ARCH) -Ibpf/include -c $< -o $@
 
 clean:

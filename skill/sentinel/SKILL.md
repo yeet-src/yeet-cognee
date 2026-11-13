@@ -66,7 +66,11 @@ edits `memory/context/sandbox-policy.md`.
 
 `./play.sh` brings the stack up and opens tmux with the sentinel console on
 the left and a bash treated as `agent-99` on the right. In the console the
-user types `bad <why>` or `good <why>` to rule on the last verdict.
+user types `bad <why>` or `good <why>` to rule on the last verdict. Add
+`--enforce` (or run the service with `--enforce`) to block denied opens with
+a BPF LSM `file_open` hook: it matches the resolved file by inode and
+basename, so symlinks, relative paths and forked children can't evade it.
+Only watched processes are blocked.
 
 ## Learn a profile
 

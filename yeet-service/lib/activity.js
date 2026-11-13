@@ -1,5 +1,5 @@
 import probe from "../activity.bpf.o";
-import { ArrayMap, RingBuf } from "yeet:bpf";
+import { ArrayMap, HashMap, RingBuf } from "yeet:bpf";
 
 import { watched } from "./match.js";
 import { PROCS } from "./queries.js";
@@ -10,6 +10,10 @@ const O_WRONLY = 1, O_RDWR = 2, O_CREAT = 0o100;
 const AF_INET6 = 10;
 const PARENT_DEPTH = 6;
 const STREAMS = ["execs", "opens", "connects", "chdirs"];
+const NAME_CAP = 64;
+const BASE = { exact: 1, prefix: 2, suffix: 3 };
+const ENFORCE_ON = 0, ENFORCE_DENIED = 1, PROTECT_EXEC = 2, PROTECT_PTRACE = 3;
+const DIR_MAX = 16;
 
 const NOISE_PREFIXES = [
   "/usr/lib", "/lib", "/usr/share", "/usr/local/lib", "/etc/ld.so", "/proc/self/",
@@ -78,7 +82,8 @@ const log = new Ring(CAPACITY);
 const identity = new Map();
 const executed = new Set();
 let filtered = 0;
-let lost;
+let lost, denyInode, denyWrite, denyExec, denyBase, dirComponent, watchedMap, enforce;
+let enforceWatch = [];
 
 let clockOffsetMs = null;
 
@@ -104,7 +109,7 @@ const onOpen = ({ open_event: e }) => {
   if (!path) return;
   if (isNoise(path)) { filtered++; return; }
   const { ns, t } = stamp(e);
-  log.push({ ns, t, kind: "open", pid: e.pid, uid: e.uid, comm: cstring(e.comm), path, dfd: e.dfd, access: access(e.flags), create: Boolean(e.flags & O_CREAT) });
+  log.push({ ns, t, kind: "open", pid: e.pid, uid: e.uid, comm: cstring(e.comm), path, dfd: e.dfd, access: access(e.flags), create: Boolean(e.flags & O_CREAT), blocked: Boolean(e.blocked) });
 };
 
 const onChdir = ({ chdir_event: e }) => {
@@ -124,14 +129,106 @@ export async function start() {
     .bind("connects", { kind: "ringbuf", btf_struct: "connect_event", capacity: 8192 })
     .bind("chdirs", { kind: "ringbuf", btf_struct: "chdir_event", capacity: 4096 })
     .bind("lost", { kind: "array" })
+    .bind("deny_inode", { kind: "hash" })
+    .bind("deny_write", { kind: "hash" })
+    .bind("deny_exec", { kind: "hash" })
+    .bind("deny_base", { kind: "array" })
+    .bind("dir_component", { kind: "array" })
+    .bind("watched", { kind: "hash" })
+    .bind("enforce", { kind: "array" })
     .start();
   lost = new ArrayMap(control, "lost");
+  denyInode = new HashMap(control, "deny_inode");
+  denyWrite = new HashMap(control, "deny_write");
+  denyExec = new HashMap(control, "deny_exec");
+  denyBase = new ArrayMap(control, "deny_base");
+  dirComponent = new ArrayMap(control, "dir_component");
+  watchedMap = new HashMap(control, "watched");
+  enforce = new ArrayMap(control, "enforce");
   await new RingBuf(control, "execs").subscribe(onExec);
   await new RingBuf(control, "opens").subscribe(onOpen);
   await new RingBuf(control, "connects").subscribe(onConnect);
   await new RingBuf(control, "chdirs").subscribe(onChdir);
   console.log(`activity: logging execs, opens, chdirs and connects (capacity ${CAPACITY})`);
   return control;
+}
+
+const fillInodes = async (map, inodes) => {
+  for await (const [key] of map.entries()) await map.delete(key).catch(() => {});
+  for (const { dev, ino } of inodes) await map.update({ ino: BigInt(ino), dev }, 1);
+  return inodes.length;
+};
+
+const fillBases = async (map, entries, cap) => {
+  const kept = entries.filter((b) => BASE[b.kind] && b.text && b.text.length < NAME_CAP).slice(0, cap);
+  await map.update(0, { kind: 0, len: kept.length, text: "" });  // index 0: count in the len byte
+  for (let i = 0; i < kept.length; i++) {
+    await map.update(i + 1, { kind: BASE[kept[i].kind], len: kept[i].text.length, text: kept[i].text });
+  }
+  return kept.length;
+};
+
+export async function setEnforcement({
+  on = false, watch = [], inodes = [], basenames = [],
+  writes = [], execs = [], dirs = [], protectExec = false, protectPtrace = false,
+} = {}) {
+  if (!enforce) return { on: false };
+  enforceWatch = watch;
+
+  const counts = {
+    inodes: await fillInodes(denyInode, inodes),
+    writes: await fillInodes(denyWrite, writes),
+    execs: await fillInodes(denyExec, execs),
+    basenames: await fillBases(denyBase, basenames, 126),
+    dirs: await fillBases(dirComponent, dirs.map((text) => ({ kind: "exact", text })), DIR_MAX),
+  };
+
+  await enforce.update(PROTECT_EXEC, protectExec ? 1n : 0n);
+  await enforce.update(PROTECT_PTRACE, protectPtrace ? 1n : 0n);
+  await enforce.update(ENFORCE_ON, on ? 1n : 0n);
+  return { on, watch, protectExec, protectPtrace, ...counts };
+}
+
+async function syncWatched(procs) {
+  if (!watchedMap || !enforceWatch.length) return;
+  const live = new Set(procs.map((p) => p.pid));
+  for (const proc of procs) {
+    if (watched(proc, enforceWatch, [])) await watchedMap.update(proc.pid, 1);
+  }
+  for await (const [pid] of watchedMap.entries()) {
+    if (!live.has(Number(pid))) await watchedMap.delete(pid).catch(() => {});
+  }
+}
+
+async function deniedCount() {
+  const n = enforce ? await enforce.lookup(ENFORCE_DENIED) : 0n;
+  return Number(n ?? 0n);
+}
+
+const count = async (map) => {
+  let n = 0;
+  for await (const _ of map.entries()) n++;
+  return n;
+};
+
+export async function enforceStatus() {
+  if (!enforce) return { bound: false };
+  const base = await denyBase.lookup(0);
+  const dir = await dirComponent.lookup(0);
+  return {
+    bound: true,
+    on: Number((await enforce.lookup(ENFORCE_ON)) ?? 0n),
+    denied: await deniedCount(),
+    watchedPids: await count(watchedMap),
+    inodes: await count(denyInode),
+    writes: await count(denyWrite),
+    execs: await count(denyExec),
+    basenames: base ? base.len : 0,
+    dirs: dir ? dir.len : 0,
+    protectExec: Number((await enforce.lookup(PROTECT_EXEC)) ?? 0n),
+    protectPtrace: Number((await enforce.lookup(PROTECT_PTRACE)) ?? 0n),
+    enforceWatch,
+  };
 }
 
 async function refreshIdentities() {
@@ -141,6 +238,7 @@ async function refreshIdentities() {
     const cwds = identity.get(p.pid).cwds;
     if (p.cwd && !cwds.some((c) => c.path === p.cwd)) cwds.push({ ns: null, path: p.cwd });
   }
+  await syncWatched(data?.procs ?? []);
 }
 
 const cwdAt = (pid, ns, depth = 0) => {
@@ -164,7 +262,7 @@ const resolved = (event) => {
 const annotated = (event) =>
   event.kind === "open" && event.access !== "read" && executed.has(event.path) ? { ...event, executed: true } : event;
 
-const serialized = ({ ns, dfd, ...event }) => event;
+const serialized = ({ ns, dfd, blocked, ...event }) => (blocked ? { ...event, blocked } : event);
 
 async function lostCounts() {
   const counts = await Promise.all(STREAMS.map((_, i) => lost.lookup(i)));
@@ -209,7 +307,7 @@ export async function activity({ watch = [], self = [], since = 0, until = Infin
   return {
     since: new Date(since).toISOString(),
     until: new Date(Math.min(until, Date.now())).toISOString(),
-    log: { size: log.size, dropped: log.dropped, filtered, lost: await lostCounts(), capacity: CAPACITY },
+    log: { size: log.size, dropped: log.dropped, filtered, lost: await lostCounts(), denied: await deniedCount(), capacity: CAPACITY },
     events: total,
     processes: [...roots.values()].map((g) => ({ ...g, children: [...g.children] })),
   };

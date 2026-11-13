@@ -6,6 +6,7 @@ AGENTS=${AGENTS:-5}
 LEARN=${LEARN:-45}
 KEEP=0
 SETUP=1
+ENFORCE=${ENFORCE:-0}
 PY="$PWD/memory/.venv/bin/python"
 SERVER="${SENTINEL_SERVER_URL:-http://127.0.0.1:9495}"
 READER="${SENTINEL_READER_URL:-http://127.0.0.1:9490}"
@@ -21,6 +22,7 @@ parse_args() {
     case "$arg" in
       --keep) KEEP=1 ;;
       --skip-setup) SETUP=0 ;;
+      --enforce) ENFORCE=1 ;;
       --agents) ;;
       [0-9]*) AGENTS="$arg" ;;
       -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
@@ -79,7 +81,8 @@ setup_cognee() {
 start_sentinel() {
   say "starting the sentinel$([ "$SETUP" = 1 ] && echo ' (seeding the policy; minutes on a local model)')"
   local seed=""; [ "$SETUP" = 1 ] && seed="--seed --reset"
-  ( cd memory && exec "$PY" -m sentinel.serve $seed --watch agent- --every 60 ) > "$LOG/serve.log" 2>&1 &
+  local enf=""; [ "${ENFORCE:-0}" = 1 ] && enf="--enforce"
+  ( cd memory && exec "$PY" -m sentinel.serve $seed --watch agent- $enf --every 60 ) > "$LOG/serve.log" 2>&1 &
   SERVE_PID=$!
   for _ in $(seq 1 600); do
     curl -sf -m 2 "$SERVER/healthz" >/dev/null && break

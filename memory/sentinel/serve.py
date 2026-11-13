@@ -8,6 +8,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import deny as denylist
 from . import rules
 from .activity import Activity, brief, summarize
 from .ask import verdict
@@ -42,10 +43,23 @@ def find(path: pathlib.Path, id: str) -> dict | None:
 
 
 class Sentinel:
-    def __init__(self, reader: Reader, memory: Memory, host: str):
+    def __init__(self, reader: Reader, memory: Memory, host: str, enforce: bool, watch: list[str]):
         self.reader = reader
         self.memory = memory
         self.host = host
+        self.enforce = enforce
+        self.watch = watch
+
+    def push_deny(self) -> dict:
+        sets = denylist.sets()
+        result = self.reader.enforce(self.enforce, self.watch, sets)
+        if sets.unresolved:
+            print(f"[enforce] finding-only (can't be matched by inode or name): {', '.join(sets.unresolved)}", flush=True)
+        return {
+            "enforcing": self.enforce, "inodes": len(sets.read_inodes), "writes": len(sets.write_inodes),
+            "execs": len(sets.exec_inodes), "basenames": len(sets.basenames), "dirs": len(sets.dirs),
+            "unresolved": sets.unresolved, **(result or {}),
+        }
 
     def observe(self, watch: list[str], seconds: int) -> list[dict]:
         return self.reader.activity(watch, now_ms() - seconds * 1000)["processes"]
@@ -87,6 +101,8 @@ class Sentinel:
         allowed = [] if correct else self._allow(record)
         rule = rules.compile(id, record["findings"], note, self.memory.recall(_precedent_query(record, note))) if correct else None
         self.memory.remember_later(_review_prose(record, correct, note, allowed, rule), f"review-{id}")
+        if self.enforce:
+            self.push_deny()
         return {"id": id, "correct": correct, "allowed": sorted(a.name for a in allowed), "rule": rule and vars(rule)}
 
     def _allow(self, record: dict) -> list[Activity]:
@@ -180,6 +196,14 @@ def handler(sentinel: Sentinel):
                 return self._send(200, {"ok": True})
             if self.path.rstrip("/") == "/rules":
                 return self._send(200, {"rules": [vars(r) for r in rules.load()]})
+            if self.path.rstrip("/") == "/deny":
+                s = denylist.sets()
+                return self._send(200, {
+                    "enforcing": sentinel.enforce, "watch": sentinel.watch,
+                    "inodes": [i["path"] for i in s.read_inodes], "writes": [i["path"] for i in s.write_inodes],
+                    "execs": [i["path"] for i in s.exec_inodes], "basenames": s.basenames, "dirs": s.dirs,
+                    "protectExec": s.protect_exec, "protectPtrace": s.protect_ptrace, "unresolved": s.unresolved,
+                })
             self._send(404, {"error": f"no such route: {self.path}"})
 
         def do_POST(self):
@@ -213,6 +237,7 @@ def main() -> int:
     ap.add_argument("--hostname", default=socket.gethostname())
     ap.add_argument("--seed", action="store_true", help="remember context/*.md on startup")
     ap.add_argument("--reset", action="store_true", help="with --seed, forget everything first")
+    ap.add_argument("--enforce", action="store_true", help="block denied opens in the kernel, not just flag them")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9495)
     args = ap.parse_args()
@@ -220,7 +245,14 @@ def main() -> int:
     memory = Memory(args.dataset)
     if args.seed:
         print(f"seeded {', '.join(memory.seed(args.reset))}", flush=True)
-    sentinel = Sentinel(Reader(args.reader), memory, args.hostname)
+    sentinel = Sentinel(Reader(args.reader), memory, args.hostname, args.enforce, args.watch)
+    pushed = sentinel.push_deny()
+    print(
+        f"[enforce] {'blocking' if args.enforce else 'observing'}: "
+        f"{pushed['inodes']} inodes, {pushed['writes']} tamper, {pushed['execs']} exec, "
+        f"{pushed['basenames']} names, {pushed['dirs']} dirs for {args.watch or 'nothing'}",
+        flush=True,
+    )
 
     stop = threading.Event()
     if args.every and args.watch:

@@ -1,9 +1,9 @@
-import { activity, start as startActivityLog } from "./lib/activity.js";
+import { activity, enforceStatus, setEnforcement, start as startActivityLog } from "./lib/activity.js";
 import { reading } from "./lib/assemble.js";
 
 const HOSTNAME = yeet.args?.hostname ?? null;
 const SELF = ["sentinel", "fleet.py", "demo.sh"];
-const ROUTES = "routes: / /reading (?watch=a,b ?self=a,b ?top=N) /activity (?watch=a,b ?self=a,b ?since=ms ?until=ms ?limit=N)";
+const ROUTES = "routes: / /reading /activity /enforce (?spec=<url-encoded json {on, watch, deny}>)";
 
 function parse(url) {
   const [path, query = ""] = String(url ?? "/").split("?", 2);
@@ -26,6 +26,10 @@ const integer = (params, name, fallback) => {
 
 async function respond(peer, url) {
   const { path, params } = parse(url);
+  if (path === "/enforce") {
+    if (!params.has("spec")) return peer.write(JSON.stringify(await enforceStatus()));
+    return peer.write(JSON.stringify(await setEnforcement(JSON.parse(params.get("spec")))));
+  }
   if (path === "/activity") {
     return peer.write(JSON.stringify(await activity({
       watch: list(params.get("watch")),
