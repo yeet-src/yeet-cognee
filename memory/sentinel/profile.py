@@ -13,6 +13,8 @@ class Finding:
     kind: str
     workload: str
     what: str
+    category: str = ""
+    subject: str = ""
 
     def __str__(self) -> str:
         return f"[{self.kind}] {self.workload}: {self.what}"
@@ -61,23 +63,36 @@ class Profile:
 
     def findings(self, act: Activity) -> list[Finding]:
         policy = [
-            *(f"attempted to open `{p}`" for p in act.sensitive),
-            *(f"wrote to `{p}`, a program this host executes" for p in act.program_writes),
-            *(f"ran `{p}`, whose binary ({fingerprint(p)}) is not the one the profile learned"
+            *((f"attempted to open `{p}`", "sensitive", p) for p in act.sensitive),
+            *((f"wrote to `{p}`, a program this host executes", "program_write", p) for p in act.program_writes),
+            *((f"ran `{p}`, whose binary ({fingerprint(p)}) is not the one the profile learned", "tamper", p)
               for p in act.programs if self.programs.get(p) and self.programs[p] != fingerprint(p).sha256),
         ]
         novel = [
-            *(f"ran `{p}`, which no `{self.role}` workload has run before" for p in act.programs if p not in self.programs),
-            *(f"wrote under `{d}`, where no `{self.role}` workload has written before" for d in act.write_dirs - self.write_dirs),
-            *(f"read under `{d}`, where no `{self.role}` workload has read before" for d in act.read_dirs - self.read_dirs),
-            *(f"dialled `{e}`, which no `{self.role}` workload has dialled before" for e in act.endpoints - self.endpoints),
-            *([f"read other processes' /proc entries {act.peeks} times; no `{self.role}` workload has done that before"]
+            *((f"ran `{p}`, which no `{self.role}` workload has run before", "program", p) for p in act.programs if p not in self.programs),
+            *((f"wrote under `{d}`, where no `{self.role}` workload has written before", "write_dir", d) for d in act.write_dirs - self.write_dirs),
+            *((f"read under `{d}`, where no `{self.role}` workload has read before", "read_dir", d) for d in act.read_dirs - self.read_dirs),
+            *((f"dialled `{e}`, which no `{self.role}` workload has dialled before", "endpoint", e) for e in act.endpoints - self.endpoints),
+            *([(f"read other processes' /proc entries {act.peeks} times; no `{self.role}` workload has done that before", "peek", "")]
               if act.peeks and not self.peeks else []),
         ]
-        return [Finding("policy", act.name, w) for w in policy] + [Finding("novel", act.name, w) for w in novel]
+        return ([Finding("policy", act.name, w, c, s) for w, c, s in policy]
+                + [Finding("novel", act.name, w, c, s) for w, c, s in novel])
 
-    def allow(self, act: Activity) -> None:
-        self.learn(act)
+    def bless(self, category: str, subject: str) -> bool:
+        if category == "program":
+            self.programs.setdefault(subject, fingerprint(subject).sha256)
+        elif category == "read_dir":
+            self.read_dirs.add(subject)
+        elif category == "write_dir":
+            self.write_dirs.add(subject)
+        elif category == "endpoint":
+            self.endpoints.add(subject)
+        elif category == "peek":
+            self.peeks = True
+        else:
+            return False
+        return True
 
     def describe(self, host: str) -> str:
         programs = {p: fingerprint(p) for p in self.programs}

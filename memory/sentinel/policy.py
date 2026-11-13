@@ -3,7 +3,10 @@ SENSITIVE_PREFIXES = (
     "/dev/kmsg", "/dev/mem", "/dev/kvm", "/sys/kernel", "/etc/shadow", "/etc/sudoers",
     "/root/", "/proc/1/", "/proc/mounts", "/proc/sys/kernel",
 )
-SENSITIVE_SUFFIXES = ("/environ", "/mem", "/maps", "id_rsa", "id_ed25519", ".kube/config", ".aws/credentials")
+# System secrets stay baked in. User-credential locations (~/.aws, ~/.ssh,
+# ~/.kube) are deliberately NOT here: they vary per host and are meant to be
+# learned — a human rules on them once and the rule generalizes as case law.
+SENSITIVE_SUFFIXES = ("/environ", "/mem", "/maps")
 PROGRAM_DIRS = ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/local/bin/", "/usr/local/sbin/", "/opt/")
 KNOWN_HOSTS = ("api.github.com", "api.anthropic.com", "github.com")
 

@@ -10,8 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import deny as denylist
 from . import rules
-from .activity import Activity, brief, summarize
-from .ask import verdict
+from .activity import Activity, brief, role_of, summarize
+from .ask import needs_decision, verdict
 from .llm import describe as describe_llm
 from .memory import Memory
 from .profile import Finding, Profile
@@ -68,10 +68,13 @@ class Sentinel:
         learned = rules.load()
         return [f for act in acts for f in Profile.load(act.role).findings(act) + _ruled(act, learned)]
 
-    def observe_since(self, watch: list[str], since_ms: int) -> dict:
+    def observe_since(self, watch: list[str], since_ms: int, verbose: bool = False) -> dict:
         payload = self.reader.activity(watch, since_ms)
         acts = [summarize(g) for g in payload["processes"]]
-        return {"until": payload["until"], "workloads": {a.name: brief(a) for a in acts}, "findings": [vars(f) for f in self.findings(acts)]}
+        out = {"until": payload["until"], "workloads": {a.name: brief(a) for a in acts}, "findings": [vars(f) for f in self.findings(acts)]}
+        if verbose:
+            out["events"] = [e for act, group in zip(acts, payload["processes"]) for e in _events(act.name, group)][:100]
+        return out
 
     def learn(self, watch: list[str], seconds: int) -> list[Profile]:
         profiles: dict[str, Profile] = {}
@@ -89,33 +92,47 @@ class Sentinel:
         text = verdict(question, acts, findings, self.memory.recall(), self.host)
         record = {
             "id": secrets.token_hex(4), "asked_at": stamp(), "question": question, "watch": watch,
-            "verdict": text, "findings": [vars(f) for f in findings],
+            "verdict": text, "decision": needs_decision(text), "findings": [vars(f) for f in findings],
         }
         append(VERDICTS, {**record, "groups": groups})
         return record
 
-    def review(self, id: str, correct: bool, note: str) -> dict:
+    def add_rule(self, patterns: list[str], reason: str, action: str) -> rules.Rule | None:
+        patterns = [p.strip() for p in patterns if p.strip()]
+        if not patterns:
+            return None
+        existing = rules.load()
+        rule = rules.Rule(tuple(patterns), reason or "set by a human", (f"manual-{secrets.token_hex(3)}",), action if action in ("read", "write", "exec") else "read")
+        rules.save([*existing, rule])
+        self.memory.remember_later(_rule_prose(rule, self.host), f"rule-{rule.verdict}")
+        if self.enforce:
+            self.push_deny()
+        return rule
+
+    def review(self, id: str, correct: bool, note: str, which: list[int] | None = None) -> dict:
         record = find(VERDICTS, id)
         if not record:
             raise KeyError(id)
-        allowed = [] if correct else self._allow(record)
-        rule = rules.compile(id, record["findings"], note, self.memory.recall(_precedent_query(record, note))) if correct else None
-        self.memory.remember_later(_review_prose(record, correct, note, allowed, rule), f"review-{id}")
+        findings = record["findings"]
+        chosen = [findings[i] for i in which if 0 <= i < len(findings)] if which else findings
+        rule = rules.compile(id, chosen, note, self.memory.recall(_precedent_query(chosen, note))) if correct else None
+        allowed = [] if correct else self._bless(chosen)
+        self.memory.remember_later(_review_prose(record, correct, note, allowed, rule, chosen), f"review-{id}")
         if self.enforce:
             self.push_deny()
-        return {"id": id, "correct": correct, "allowed": sorted(a.name for a in allowed), "rule": rule and vars(rule)}
+        return {"id": id, "correct": correct, "allowed": allowed, "rule": rule and vars(rule), "count": len(chosen)}
 
-    def _allow(self, record: dict) -> list[Activity]:
-        novel = {f["workload"] for f in record["findings"] if f["kind"] == "novel"}
-        acts = [act for act in map(summarize, record["groups"]) if act.name in novel]
-        for role in {a.role for a in acts}:
-            profile = Profile.load(role)
-            for act in acts:
-                if act.role == role:
-                    profile.allow(act)
+    def _bless(self, findings: list[dict]) -> list[str]:
+        touched: dict[str, Profile] = {}
+        blessed: list[str] = []
+        for f in findings:
+            profile = touched.setdefault(role_of(f["workload"]), Profile.load(role_of(f["workload"])))
+            if profile.bless(f.get("category", ""), f.get("subject", "")):
+                blessed.append(f.get("subject") or f["what"])
+        for role, profile in touched.items():
             profile.save()
             self.memory.remember_later(profile.describe(self.host), f"profile-{role}")
-        return acts
+        return sorted(set(blessed))
 
     def patrol(self, watch: list[str], every: int, stop: threading.Event) -> None:
         since = now_ms()
@@ -138,35 +155,57 @@ def _epoch_ms(iso: str) -> int:
     return int(dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000)
 
 
+def _events(name: str, group: dict) -> list[dict]:
+    rows = []
+    for e in group.get("events", []):
+        kind = e.get("kind")
+        if kind == "open":
+            rows.append({"workload": name, "verb": e.get("access", "read"), "what": e.get("path"), "blocked": bool(e.get("blocked"))})
+        elif kind == "exec":
+            rows.append({"workload": name, "verb": "exec", "what": e.get("filename"), "blocked": False})
+        elif kind == "connect":
+            rows.append({"workload": name, "verb": "conn", "what": f"{e.get('addr')}:{e.get('port')}", "blocked": False})
+    return rows
+
+
 def _ruled(act: Activity, learned: list[rules.Rule]) -> list[Finding]:
     return [
-        Finding("policy", act.name, f"opened `{path}`, which matches the learned rule `{', '.join(rule.patterns)}` ({rule.reason})")
+        Finding("policy", act.name, f"opened `{path}`, which matches the learned rule `{', '.join(rule.patterns)}` ({rule.reason})", "rule", path)
         for path in sorted(act.opened)
         for rule in learned
         if rule.matches(path)
     ]
 
 
-def _review_prose(record: dict, correct: bool, note: str, allowed: list[Activity], rule: rules.Rule | None) -> str:
+def _review_prose(record: dict, correct: bool, note: str, allowed: list[str], rule: rules.Rule | None, chosen: list[dict]) -> str:
     outcome = "CONFIRMED" if correct else "REJECTED"
-    names = ", ".join(sorted(a.name for a in allowed)) or "these workloads"
+    items = "; ".join(f["what"] for f in chosen) or "the whole verdict"
     tail = (
         "Treat this behaviour as a real incident when it appears again."
         + (f" It is now a rule: files matching {', '.join(rule.patterns)} are out of bounds because {rule.reason}"
            f" (precedents: {', '.join(rule.precedents)})." if rule else "")
         if correct else
-        f"The behaviour of {names} has been added to their profile as allowed."
+        f"These are allowed now and were added to the profile: {', '.join(allowed) or 'nothing to add'}."
     )
     return (
         f"# Human review of sentinel verdict {record['id']}\n\n"
         f"On {record['asked_at']} the sentinel was asked about {record['watch'] or 'the whole host'}: "
         f"\"{record['question']}\". It answered: {record['verdict']}\n\n"
-        f"A human reviewer {outcome} this verdict" + (f", saying: {note}." if note else ".") + f" {tail}"
+        f"A human reviewer {outcome} these findings: {items}" + (f", saying: {note}." if note else ".") + f" {tail}"
     )
 
 
-def _precedent_query(record: dict, note: str) -> str:
-    return "Human reviews of earlier sentinel verdicts about behaviour like this: " + note + " " + " ".join(f["what"] for f in record["findings"])
+def _precedent_query(findings: list[dict], note: str) -> str:
+    return "Human reviews of earlier sentinel verdicts about behaviour like this: " + note + " " + " ".join(f["what"] for f in findings)
+
+
+def _rule_prose(rule: rules.Rule, host: str) -> str:
+    verb = {"write": "written to", "exec": "run"}.get(rule.action, "read")
+    return (
+        f"# Human-set rule on host {host} at {stamp()}\n\n"
+        f"A human declared that files matching {', '.join(rule.patterns)} must not be {verb} by a watched workload, "
+        f"because {rule.reason}. This was set directly, not from a verdict."
+    )
 
 
 def _observation_prose(findings: list[Finding], host: str) -> str:
@@ -216,9 +255,13 @@ def handler(sentinel: Sentinel):
                     profiles = sentinel.learn(body.get("watch") or [], int(body.get("seconds") or DEFAULT_WINDOW_S))
                     return self._send(200, {"profiles": {p.role: sorted(p.workloads) for p in profiles}})
                 if route == "/observe":
-                    return self._send(200, sentinel.observe_since(body.get("watch") or [], int(body.get("since") or now_ms() - 5000)))
+                    return self._send(200, sentinel.observe_since(body.get("watch") or [], int(body.get("since") or now_ms() - 5000), bool(body.get("verbose"))))
                 if route == "/review":
-                    return self._send(202, sentinel.review(body["id"], bool(body["correct"]), body.get("note") or ""))
+                    return self._send(202, sentinel.review(body["id"], bool(body["correct"]), body.get("note") or "", body.get("which")))
+                if route == "/rule":
+                    patterns = body.get("patterns") or ([body["pattern"]] if body.get("pattern") else [])
+                    rule = sentinel.add_rule(patterns, body.get("reason") or "", body.get("action") or "read")
+                    return self._send(201, {"rule": rule and vars(rule)})
                 self._send(404, {"error": f"no such route: {self.path}"})
             except KeyError as exc:
                 self._send(400, {"error": f"missing or unknown {exc}"})

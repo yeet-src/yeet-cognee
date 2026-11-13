@@ -86,6 +86,7 @@ let lost, denyInode, denyWrite, denyExec, denyBase, dirComponent, watchedMap, en
 let enforceWatch = [];
 
 let clockOffsetMs = null;
+let latestT = 0;
 
 const learn = (pid, fields) => identity.set(pid, { cwds: [], ...identity.get(pid), ...fields });
 
@@ -94,7 +95,12 @@ const wallClock = (ns) => {
   return Number(ns / 1_000_000n) + clockOffsetMs;
 };
 
-const stamp = (e) => ({ ns: BigInt(e.ts), t: wallClock(BigInt(e.ts)) });
+const stamp = (e) => {
+  const ns = BigInt(e.ts);
+  const t = wallClock(ns);
+  if (t > latestT) latestT = t;
+  return { ns, t };
+};
 
 const onExec = ({ exec_event: e }) => {
   const { ns, t } = stamp(e);
@@ -269,36 +275,42 @@ async function lostCounts() {
   return Object.fromEntries(STREAMS.map((name, i) => [name, Number(counts[i] ?? 0)]));
 }
 
-const rootOf = (roots, pid) => {
+const watchedRoot = (pid, watch, self) => {
+  let root = null;
   for (let depth = 0, cur = pid; depth < PARENT_DEPTH && cur != null; depth++) {
-    if (roots.has(cur)) return roots.get(cur);
-    cur = identity.get(cur)?.ppid;
+    const id = identity.get(cur);
+    if (!id) break;
+    if (watched(id, watch, self)) root = cur;
+    cur = id.ppid;
   }
-  return null;
+  return root;
 };
 
 export async function activity({ watch = [], self = [], since = 0, until = Infinity, limit = 2000 } = {}) {
   await refreshIdentities();
   for (const event of log.between(0, Infinity)) if (event.kind === "exec") executed.add(resolved(event).filename);
 
+  // Bound the window by the newest event we actually have, not Date.now(): the
+  // reader's wall clock can drift ahead of the monotonic clock events are
+  // stamped with, and advancing a caller's cursor past that gap starves it.
+  const ceiling = Math.min(until, latestT || Date.now());
+
+  // Attribute each event to the topmost watched ancestor, so a child's events
+  // still land on the group when the root process itself was idle this window.
   const roots = new Map();
-  for (const event of log.between(since, until)) {
-    const id = identity.get(event.pid);
-    if (id && !roots.has(event.pid) && watched(id, watch, self)) {
-      roots.set(event.pid, {
-        pid: event.pid, comm: id.comm, exe: id.exe, cmdline: id.cmdline ?? [], cwd: cwdAt(event.pid, event.ns), uid: id.uid,
+  let total = 0;
+  for (const event of log.between(since, ceiling)) {
+    const rootPid = watchedRoot(event.pid, watch, self);
+    if (rootPid == null) continue;
+    if (!roots.has(rootPid)) {
+      const id = identity.get(rootPid);
+      roots.set(rootPid, {
+        pid: rootPid, comm: id.comm, exe: id.exe, cmdline: id.cmdline ?? [], cwd: cwdAt(rootPid, event.ns), uid: id.uid,
         events: [], truncated: 0, children: new Set(),
       });
     }
-  }
-
-  for (const pid of [...roots.keys()]) if (rootOf(roots, identity.get(pid)?.ppid)) roots.delete(pid);
-
-  let total = 0;
-  for (const event of log.between(since, until)) {
-    const group = rootOf(roots, event.pid);
-    if (!group) continue;
-    if (event.pid !== group.pid) group.children.add(event.pid);
+    const group = roots.get(rootPid);
+    if (event.pid !== rootPid) group.children.add(event.pid);
     total++;
     if (group.events.length >= limit) group.truncated++;
     else group.events.push(serialized(annotated(resolved(event))));
@@ -306,7 +318,7 @@ export async function activity({ watch = [], self = [], since = 0, until = Infin
 
   return {
     since: new Date(since).toISOString(),
-    until: new Date(Math.min(until, Date.now())).toISOString(),
+    until: new Date(ceiling).toISOString(),
     log: { size: log.size, dropped: log.dropped, filtered, lost: await lostCounts(), denied: await deniedCount(), capacity: CAPACITY },
     events: total,
     processes: [...roots.values()].map((g) => ({ ...g, children: [...g.children] })),
